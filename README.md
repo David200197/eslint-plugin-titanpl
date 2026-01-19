@@ -5,7 +5,7 @@ ESLint plugin for [Titan Planet](https://titan-docs-ez.vercel.app/docs) projects
 ## Installation
 
 ```bash
-npm install @titanpl/eslint-plugin-titanpl --save-dev
+npm install eslint-plugin-titanpl --save-dev
 ```
 
 ## Usage
@@ -14,7 +14,7 @@ npm install @titanpl/eslint-plugin-titanpl --save-dev
 
 ```javascript
 // eslint.config.js
-import { titanpl } from '@titanpl/eslint-plugin-titanpl';
+import { titanpl } from 'eslint-plugin-titanpl';
 
 export default [
   titanpl,
@@ -26,7 +26,7 @@ export default [
 
 ```javascript
 // eslint.config.js
-import plugin from '@titanpl/eslint-plugin-titanpl';
+import plugin from 'eslint-plugin-titanpl';
 import globals from 'globals';
 
 export default [
