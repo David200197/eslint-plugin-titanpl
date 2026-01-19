@@ -1,0 +1,52 @@
+{
+    "name": "@titanpl/eslint-plugin-titanpl",
+    "version": "1.0.0",
+    "description": "ESLint plugin for TitanPL projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules that are not available in the TitanPL runtime.",
+    "license": "ISC",
+    "author": "David200197",
+    "type": "module",
+    "main": "index.js",
+    "exports": {
+        ".": "./index.js"
+    },
+    "files": [
+        "index.js",
+        "rules/",
+        "constants/",
+        "README.md"
+    ],
+    "keywords": [
+        "eslint",
+        "eslintplugin",
+        "eslint-plugin",
+        "titan",
+        "titanpl",
+        "titanjs",
+        "ezetgalaxy",
+        "linter",
+        "javascript",
+        "static-analysis",
+        "code-quality"
+    ],
+    "scripts": {
+        "test": "node --test",
+        "test:watch": "node --test --watch"
+    },
+    "dependencies": {
+        "globals": "^16.0.0"
+    },
+    "devDependencies": {
+        "eslint": "^9.0.0"
+    },
+    "peerDependencies": {
+        "eslint": ">=9.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/David200197/eslint-plugin-titanpl.git"
+    },
+    "bugs": {
+        "url": "https://github.com/David200197/eslint-plugin-titanpl/issues"
+    },
+    "homepage": "https://github.com/David200197/eslint-plugin-titanpl#readme"
+}
