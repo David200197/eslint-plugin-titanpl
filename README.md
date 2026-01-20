@@ -80,7 +80,7 @@ export { join } from 'path';
 const content = t.core.fs.readFile('config.json');
 const fullPath = t.core.path.join('dir', 'file.txt');
 const hash = t.core.crypto.hash('sha256', 'data');
-const response = await t.fetch('https://api.example.com');
+const response = t.fetch('https://api.example.com');
 
 // External packages are allowed
 import { something } from 'lodash';
