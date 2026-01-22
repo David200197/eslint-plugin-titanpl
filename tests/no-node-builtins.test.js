@@ -14,63 +14,147 @@ describe('no-node-builtins', () => {
         ruleTester.run('no-node-builtins', noNodeBuiltins, {
             valid: [
                 `import { something } from 'lodash'`,
+                `import axios from 'axios'`,
                 `import utils from './utils.js'`,
+                `import config from '../config.js'`,
                 `export { foo } from './foo.js'`,
+                `export * from './helpers/index.js'`,
             ],
             invalid: [
-                // fs - tiene alternativa t.core.fs
+                // ============================================
+                // Módulos CON alternativa en Titan
+                // ============================================
+                
+                // fs → t.core.fs
                 {
                     code: `import fs from 'fs'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // node:fs - mismo caso con prefijo node:
                 {
                     code: `import { readFile } from 'node:fs'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // path - tiene alternativa t.core.path
+                
+                // path → t.core.path
                 {
                     code: `import path from 'path'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // export desde path
                 {
                     code: `export { join } from 'path'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // import dinámico
-                {
-                    code: `const fs = await import('fs')`,
-                    errors: [{ messageId: 'notAvailable' }]
-                },
-                // crypto - tiene alternativa t.core.crypto
+                
+                // crypto → t.core.crypto
                 {
                     code: `import crypto from 'crypto'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // os - tiene alternativa t.core.os
+                
+                // os → t.core.os
                 {
                     code: `import os from 'os'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // http - tiene alternativa t.fetch()
+                
+                // http/https → t.fetch()
                 {
                     code: `import http from 'http'`,
                     errors: [{ messageId: 'notAvailable' }]
                 },
-                // child_process - NO tiene alternativa
+                {
+                    code: `import https from 'https'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // buffer → t.core.buffer
+                {
+                    code: `import { Buffer } from 'buffer'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // url → t.core.url
+                {
+                    code: `import { URL } from 'url'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // querystring → t.core.url.SearchParams
+                {
+                    code: `import qs from 'querystring'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // dns → t.core.net.resolveDNS()
+                {
+                    code: `import dns from 'dns'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // net → t.core.net
+                {
+                    code: `import net from 'net'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // timers → t.core.time
+                {
+                    code: `import { setTimeout } from 'timers'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // process → t.core.proc
+                {
+                    code: `import process from 'process'`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // Import dinámico con alternativa
+                {
+                    code: `const fs = await import('fs')`,
+                    errors: [{ messageId: 'notAvailable' }]
+                },
+                
+                // ============================================
+                // Módulos SIN alternativa en Titan
+                // ============================================
+                
                 {
                     code: `import { spawn } from 'child_process'`,
                     errors: [{ messageId: 'notAvailableNoAlt' }]
                 },
-                // worker_threads - NO tiene alternativa
                 {
                     code: `import { Worker } from 'worker_threads'`,
                     errors: [{ messageId: 'notAvailableNoAlt' }]
                 },
-                // export all desde módulo sin alternativa
+                {
+                    code: `import { EventEmitter } from 'events'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
                 {
                     code: `export * from 'events'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
+                {
+                    code: `import { createReadStream } from 'stream'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
+                {
+                    code: `import cluster from 'cluster'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
+                {
+                    code: `import zlib from 'zlib'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
+                {
+                    code: `import assert from 'assert'`,
+                    errors: [{ messageId: 'notAvailableNoAlt' }]
+                },
+                
+                // Import dinámico sin alternativa
+                {
+                    code: `const { spawn } = await import('child_process')`,
                     errors: [{ messageId: 'notAvailableNoAlt' }]
                 },
             ]
