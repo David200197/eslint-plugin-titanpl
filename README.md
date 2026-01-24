@@ -82,6 +82,15 @@ const fullPath = t.core.path.join('dir', 'file.txt');
 const hash = t.core.crypto.hash('sha256', 'data');
 const response = t.fetch('https://api.example.com');
 
+// Titan-exclusive APIs
+const sessionData = t.core.session.get(sessionId, 'user');
+const cookieValue = t.core.cookies.get(req, 'token');
+t.core.ls.set('key', 'value');
+
+// Buffer utilities
+const base64 = t.core.buffer.toBase64('hello');
+const bytes = t.core.buffer.fromHex('48656c6c6f');
+
 // External packages are allowed
 import { something } from 'lodash';
 import utils from './utils.js';
@@ -93,18 +102,28 @@ When you try to use a Node.js module, the plugin will suggest the appropriate Ti
 
 | Node.js Module | Titan Alternative | Description |
 |----------------|-------------------|-------------|
-| `fs` | `t.core.fs` | File system operations |
-| `path` | `t.core.path` | Path manipulation utilities |
-| `crypto` | `t.core.crypto` | Cryptographic utilities (hash, uuid, randomBytes) |
-| `os` | `t.core.os` | Operating system information |
-| `url` | `t.core.url` | URL parsing and manipulation |
+| `fs` | `t.core.fs` | File system operations (readFile, writeFile, exists, mkdir, remove, readdir, stat) |
+| `path` | `t.core.path` | Path manipulation utilities (join, resolve, dirname, basename, extname) |
+| `crypto` | `t.core.crypto` | Cryptographic utilities (hash, uuid, randomBytes, encrypt, decrypt, hashKeyed, compare) |
+| `os` | `t.core.os` | Operating system information (platform, cpus, totalMemory, freeMemory, tmpdir) |
+| `url` | `t.core.url` | URL parsing and manipulation (parse, format, SearchParams) |
 | `querystring` | `t.core.url.SearchParams` | Query string handling |
+| `buffer` | `t.core.buffer` | Buffer utilities (fromBase64, toBase64, fromHex, toHex, fromUtf8, toUtf8) |
 | `timers` | `t.core.time` | Time utilities (sleep, now, timestamp) |
 | `process` | `t.core.proc` | Process information (pid, uptime) |
 | `dns` | `t.core.net.resolveDNS()` | DNS resolution |
-| `net` | `t.core.net` | Network utilities |
+| `net` | `t.core.net` | Network utilities (resolveDNS, ip) |
 | `http` / `https` | `t.fetch()` | HTTP client via Titan fetch API |
-| `buffer` | `ArrayBuffer/TypedArray` | Use standard Web APIs |
+
+### Titan-Exclusive APIs
+
+These APIs are unique to Titan Planet and have no Node.js equivalent:
+
+| Titan API | Description |
+|-----------|-------------|
+| `t.core.ls` | Persistent key-value storage in memory (get, set, remove, clear, keys) |
+| `t.core.session` | Server-side session management (get, set, delete, clear) |
+| `t.core.cookies` | HTTP cookie parsing and serialization (get, set, delete) |
 
 ### Modules Without Alternatives
 
@@ -118,9 +137,11 @@ The plugin provides helpful error messages with suggestions:
 
 ```
 // With alternative:
-"fs" is not available in TitanPL. Use t.core.fs instead. File system operations.
+"fs" is not available in TitanPL. Use t.core.fs instead. File system operations (readFile, writeFile, exists, mkdir, remove, readdir, stat).
 
 "http" is not available in TitanPL. Use t.fetch() instead. HTTP client via Titan fetch API.
+
+"crypto" is not available in TitanPL. Use t.core.crypto instead. Cryptographic utilities (hash, uuid, randomBytes, encrypt, decrypt, hashKeyed, compare).
 
 // Without alternative:
 "child_process" is not available in TitanPL and has no direct alternative in Titan.
@@ -146,10 +167,21 @@ t.core.path.basename(path)
 t.core.path.extname(path)
 
 // Crypto
-t.core.crypto.hash(algo, data)    // 'sha256', 'sha512', 'md5'
+t.core.crypto.hash(algo, data)       // 'sha256', 'sha512', 'md5'
 t.core.crypto.randomBytes(size)
 t.core.crypto.uuid()
 t.core.crypto.compare(hash, target)
+t.core.crypto.encrypt(algo, key, plaintext)   // AES-256-GCM
+t.core.crypto.decrypt(algo, key, ciphertext)  // AES-256-GCM
+t.core.crypto.hashKeyed(algo, key, message)   // HMAC-SHA256/512
+
+// Buffer
+t.core.buffer.fromBase64(str)
+t.core.buffer.toBase64(bytes)
+t.core.buffer.fromHex(str)
+t.core.buffer.toHex(bytes)
+t.core.buffer.fromUtf8(str)
+t.core.buffer.toUtf8(bytes)
 
 // OS
 t.core.os.platform()
@@ -175,6 +207,24 @@ t.core.time.timestamp()
 t.core.url.parse(urlString)
 t.core.url.format(urlObject)
 new t.core.url.SearchParams(query)
+
+// Local Storage (Persistent Key-Value)
+t.core.ls.get(key)
+t.core.ls.set(key, value)
+t.core.ls.remove(key)
+t.core.ls.clear()
+t.core.ls.keys()
+
+// Session Management
+t.core.session.get(sessionId, key)
+t.core.session.set(sessionId, key, value)
+t.core.session.delete(sessionId, key)
+t.core.session.clear(sessionId)
+
+// Cookies
+t.core.cookies.get(req, name)
+t.core.cookies.set(res, name, value, options)  // { httpOnly, secure, sameSite, path, maxAge }
+t.core.cookies.delete(res, name)
 
 // HTTP (global)
 t.fetch(url, options)

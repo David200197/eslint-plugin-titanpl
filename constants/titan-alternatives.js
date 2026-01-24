@@ -52,8 +52,8 @@ export const TITAN_ALTERNATIVES = {
         description: 'Query string handling'
     },
     localStorage: {
-        alternative: 't.core.ls or [super-ls](https://github.com/David200197/super-ls)',
-        description: 'Persistent key-value storage via Sled (get, set, remove, clear, keys)',
+        alternative: 't.core.ls',
+        description: 'Persistent key-value storage in memory (get, set, remove, clear, keys)',
         titanOnly: true
     },
     session: {

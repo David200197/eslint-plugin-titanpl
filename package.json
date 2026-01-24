@@ -1,6 +1,6 @@
 {
     "name": "eslint-plugin-titanpl",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "ESLint plugin for TitanPL projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules that are not available in the TitanPL runtime.",
     "license": "ISC",
     "author": "David200197",
