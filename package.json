@@ -1,7 +1,7 @@
 {
     "name": "eslint-plugin-titanpl",
-    "version": "1.1.1",
-    "description": "ESLint plugin for TitanPL projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules that are not available in the TitanPL runtime.",
+    "version": "1.2.0",
+    "description": "ESLint plugin for TitanPL projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules, prohibiting async/await, and ensuring correct drift() usage.",
     "license": "ISC",
     "author": "David200197",
     "type": "module",
@@ -13,6 +13,7 @@
         "index.js",
         "rules/",
         "constants/",
+        "utils/",
         "README.md"
     ],
     "keywords": [
@@ -26,7 +27,9 @@
         "linter",
         "javascript",
         "static-analysis",
-        "code-quality"
+        "code-quality",
+        "drift",
+        "async"
     ],
     "scripts": {
         "test": "node --test",

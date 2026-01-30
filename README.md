@@ -1,6 +1,6 @@
-# @titanpl/eslint-plugin-titanpl
+# eslint-plugin-titanpl
 
-ESLint plugin for [Titan Planet](https://titan-docs-ez.vercel.app/docs) projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules that are not available in the TitanPL runtime.
+ESLint plugin for [Titan Planet](https://titan-docs-ez.vercel.app/docs) projects. Enforces TitanPL-specific rules including blocking Node.js built-in modules, prohibiting async/await, and ensuring correct `drift()` usage.
 
 ## Installation
 
@@ -41,12 +41,16 @@ export default [
       globals: {
         ...globals.es2024,
         t: 'readonly',
-        Titan: 'readonly'
+        Titan: 'readonly',
+        drift: 'readonly'
       }
     },
     rules: {
       'no-undef': 'error',
-      'titanpl/no-node-builtins': 'error'
+      'titanpl/no-node-builtins': 'error',
+      'titanpl/no-async-await': 'error',
+      'titanpl/drift-only-titan-async': 'error',
+      'titanpl/require-drift': 'error'
     }
   }
 ];
@@ -58,177 +62,179 @@ export default [
 
 Disallows importing Node.js built-in modules that are not available in the TitanPL runtime.
 
-Titan Planet is **not** a Node.js framework—it's a Rust server that speaks JavaScript/TypeScript. This means standard Node.js modules like `fs`, `path`, `http`, etc., are not available. Instead, Titan provides its own high-performance APIs through the `t` global object.
-
 #### ❌ Incorrect
 
 ```javascript
 import fs from 'fs';
 import { readFile } from 'node:fs';
 import path from 'path';
-import crypto from 'crypto';
-import http from 'http';
-
-const data = await import('fs');
-export { join } from 'path';
 ```
 
 #### ✅ Correct
 
 ```javascript
-// Use Titan's built-in APIs
-const content = t.core.fs.readFile('config.json');
+const content = drift(t.core.fs.readFile('config.json'));
 const fullPath = t.core.path.join('dir', 'file.txt');
-const hash = t.core.crypto.hash('sha256', 'data');
-const response = t.fetch('https://api.example.com');
-
-// Titan-exclusive APIs
-const sessionData = t.core.session.get(sessionId, 'user');
-const cookieValue = t.core.cookies.get(req, 'token');
-t.core.ls.set('key', 'value');
-
-// Buffer utilities
-const base64 = t.core.buffer.toBase64('hello');
-const bytes = t.core.buffer.fromHex('48656c6c6f');
-
-// External packages are allowed
-import { something } from 'lodash';
-import utils from './utils.js';
 ```
 
-## Titan Alternatives
+---
 
-When you try to use a Node.js module, the plugin will suggest the appropriate Titan alternative:
+### `titanpl/no-async-await`
 
-| Node.js Module | Titan Alternative | Description |
-|----------------|-------------------|-------------|
-| `fs` | `t.core.fs` | File system operations (readFile, writeFile, exists, mkdir, remove, readdir, stat) |
-| `path` | `t.core.path` | Path manipulation utilities (join, resolve, dirname, basename, extname) |
-| `crypto` | `t.core.crypto` | Cryptographic utilities (hash, uuid, randomBytes, encrypt, decrypt, hashKeyed, compare) |
-| `os` | `t.core.os` | Operating system information (platform, cpus, totalMemory, freeMemory, tmpdir) |
-| `url` | `t.core.url` | URL parsing and manipulation (parse, format, SearchParams) |
-| `querystring` | `t.core.url.SearchParams` | Query string handling |
-| `buffer` | `t.core.buffer` | Buffer utilities (fromBase64, toBase64, fromHex, toHex, fromUtf8, toUtf8) |
-| `timers` | `t.core.time` | Time utilities (sleep, now, timestamp) |
-| `process` | `t.core.proc` | Process information (pid, uptime) |
-| `dns` | `t.core.net.resolveDNS()` | DNS resolution |
-| `net` | `t.core.net` | Network utilities (resolveDNS, ip) |
-| `http` / `https` | `t.fetch()` | HTTP client via Titan fetch API |
+Disallows the use of `async`, `await`, `.then()`, `.catch()`, and `.finally()` in TitanPL. TitanPL uses `drift()` for async operations instead.
 
-### Titan-Exclusive APIs
+#### ❌ Incorrect
 
-These APIs are unique to Titan Planet and have no Node.js equivalent:
+```javascript
+async function fetchData() {
+  const data = await fetch('/api');
+  return data;
+}
 
-| Titan API | Description |
-|-----------|-------------|
-| `t.core.ls` | Persistent key-value storage in memory (get, set, remove, clear, keys) |
-| `t.core.session` | Server-side session management (get, set, delete, clear) |
-| `t.core.cookies` | HTTP cookie parsing and serialization (get, set, delete) |
+promise.then(callback).catch(errorHandler);
+```
 
-### Modules Without Alternatives
+#### ✅ Correct
 
-The following Node.js modules have **no direct alternative** in Titan and will show a different error message:
+```javascript
+function fetchData() {
+  const data = drift(t.fetch('/api'));
+  return data;
+}
+```
 
-`assert`, `async_hooks`, `child_process`, `cluster`, `dgram`, `events`, `module`, `perf_hooks`, `punycode`, `readline`, `stream`, `string_decoder`, `tls`, `tty`, `util`, `v8`, `vm`, `worker_threads`, `zlib`
+---
+
+### `titanpl/drift-only-titan-async`
+
+Ensures `drift()` is only used with **async** TitanPL native methods.
+
+1. The method must be from `t` or `Titan`
+2. The method must be asynchronous
+
+#### ❌ Incorrect
+
+```javascript
+// Non-Titan methods
+drift(myFunction());
+drift(console.log('test'));
+
+// Sync Titan methods (don't need drift)
+drift(t.core.path.join('a', 'b'));     // path.join is sync
+drift(t.core.url.parse('http://...'));  // url.parse is sync
+drift(t.core.crypto.uuid());            // uuid is sync
+drift(t.core.os.platform());            // os.platform is sync
+```
+
+#### ✅ Correct
+
+```javascript
+// Async Titan methods
+drift(t.fetch('/api'));
+drift(t.core.fs.readFile('/file'));
+drift(t.core.fs.writeFile('/file', 'data'));
+drift(t.core.crypto.hash('data'));
+drift(t.core.time.sleep(1000));
+drift(t.core.net.resolveDNS('example.com'));
+drift(t.core.session.get('key'));
+```
+
+---
+
+### `titanpl/require-drift`
+
+Requires `drift()` wrapper for async TitanPL native methods. Complements `drift-only-titan-async` by catching unwrapped async calls.
+
+#### ❌ Incorrect
+
+```javascript
+t.fetch('/api/data');              // Missing drift()
+t.core.fs.readFile('/file');       // Missing drift()
+t.core.crypto.hash('data');        // Missing drift()
+```
+
+#### ✅ Correct
+
+```javascript
+drift(t.fetch('/api/data'));
+drift(t.core.fs.readFile('/file'));
+drift(t.core.crypto.hash('data'));
+
+// Sync methods don't need drift
+t.core.path.join('a', 'b');
+t.core.crypto.uuid();
+```
+
+---
+
+## Configurations
+
+### Default (`titanpl`)
+
+Recommended configuration with all rules enabled:
+
+```javascript
+import { titanpl } from 'eslint-plugin-titanpl';
+
+export default [titanpl];
+```
+
+Rules enabled:
+- `no-node-builtins`: error
+- `no-async-await`: error
+- `drift-only-titan-async`: error
+- `require-drift`: error
+
+---
+
+## Async vs Sync Titan Methods
+
+### Async Methods (require `drift()`)
+
+| Module | Methods |
+|--------|---------|
+| `t.fetch` / `Titan.fetch` | HTTP requests |
+| `t.core.fs` | `readFile`, `writeFile`, `remove`, `mkdir`, `readdir`, `stat`, `exists` |
+| `t.core.crypto` | `hash`, `encrypt`, `decrypt`, `hashKeyed` |
+| `t.core.net` | `resolveDNS` |
+| `t.core.time` | `sleep` |
+| `t.core.session` | `get`, `set`, `delete`, `clear` |
+
+### Sync Methods (do NOT need `drift()`)
+
+| Module | Methods |
+|--------|---------|
+| `t.core.path` | `join`, `resolve`, `dirname`, `basename`, `extname` |
+| `t.core.url` | `parse`, `format`, `SearchParams` |
+| `t.core.crypto` | `uuid`, `randomBytes`, `compare` |
+| `t.core.os` | `platform`, `cpus`, `totalMemory`, `freeMemory`, `tmpdir` |
+| `t.core.buffer` | `fromBase64`, `toBase64`, `fromHex`, `toHex`, `fromUtf8`, `toUtf8` |
+| `t.core.time` | `now`, `timestamp` |
+| `t.core.proc` | `pid`, `uptime` |
+| `t.core.net` | `ip` |
+| `t.core.ls` | `get`, `set`, `remove`, `clear`, `keys` |
+| `t.core.cookies` | `get`, `set`, `delete` |
+
+---
 
 ## Error Messages
 
-The plugin provides helpful error messages with suggestions:
-
 ```
-// With alternative:
-"fs" is not available in TitanPL. Use t.core.fs instead. File system operations (readFile, writeFile, exists, mkdir, remove, readdir, stat).
+// no-node-builtins
+"fs" is not available in TitanPL. Use t.core.fs instead.
 
-"http" is not available in TitanPL. Use t.fetch() instead. HTTP client via Titan fetch API.
+// no-async-await
+async functions are not allowed in TitanPL. Use drift() for async operations.
+.then() is not allowed in TitanPL. Use drift() for async operations.
 
-"crypto" is not available in TitanPL. Use t.core.crypto instead. Cryptographic utilities (hash, uuid, randomBytes, encrypt, decrypt, hashKeyed, compare).
+// drift-only-titan-async
+drift() should only be used with async TitanPL methods. "t.core.path.join" is a sync method and does not require drift().
 
-// Without alternative:
-"child_process" is not available in TitanPL and has no direct alternative in Titan.
+// require-drift
+"t.fetch" is async and must be wrapped with drift(). Use: drift(t.fetch(...))
 ```
 
-## Titan Core API Quick Reference
-
-```javascript
-// File System
-t.core.fs.readFile(path)
-t.core.fs.writeFile(path, content)
-t.core.fs.exists(path)
-t.core.fs.mkdir(path)
-t.core.fs.remove(path)
-t.core.fs.readdir(path)
-t.core.fs.stat(path)
-
-// Path
-t.core.path.join(...parts)
-t.core.path.resolve(...parts)
-t.core.path.dirname(path)
-t.core.path.basename(path)
-t.core.path.extname(path)
-
-// Crypto
-t.core.crypto.hash(algo, data)       // 'sha256', 'sha512', 'md5'
-t.core.crypto.randomBytes(size)
-t.core.crypto.uuid()
-t.core.crypto.compare(hash, target)
-t.core.crypto.encrypt(algo, key, plaintext)   // AES-256-GCM
-t.core.crypto.decrypt(algo, key, ciphertext)  // AES-256-GCM
-t.core.crypto.hashKeyed(algo, key, message)   // HMAC-SHA256/512
-
-// Buffer
-t.core.buffer.fromBase64(str)
-t.core.buffer.toBase64(bytes)
-t.core.buffer.fromHex(str)
-t.core.buffer.toHex(bytes)
-t.core.buffer.fromUtf8(str)
-t.core.buffer.toUtf8(bytes)
-
-// OS
-t.core.os.platform()
-t.core.os.cpus()
-t.core.os.totalMemory()
-t.core.os.freeMemory()
-t.core.os.tmpdir()
-
-// Network
-t.core.net.resolveDNS(hostname)
-t.core.net.ip()
-
-// Process
-t.core.proc.pid()
-t.core.proc.uptime()
-
-// Time
-t.core.time.sleep(ms)
-t.core.time.now()
-t.core.time.timestamp()
-
-// URL
-t.core.url.parse(urlString)
-t.core.url.format(urlObject)
-new t.core.url.SearchParams(query)
-
-// Local Storage (Persistent Key-Value)
-t.core.ls.get(key)
-t.core.ls.set(key, value)
-t.core.ls.remove(key)
-t.core.ls.clear()
-t.core.ls.keys()
-
-// Session Management
-t.core.session.get(sessionId, key)
-t.core.session.set(sessionId, key, value)
-t.core.session.delete(sessionId, key)
-t.core.session.clear(sessionId)
-
-// Cookies
-t.core.cookies.get(req, name)
-t.core.cookies.set(res, name, value, options)  // { httpOnly, secure, sameSite, path, maxAge }
-t.core.cookies.delete(res, name)
-
-// HTTP (global)
-t.fetch(url, options)
-```
+---
 
 ## Why This Plugin?
 
@@ -236,15 +242,13 @@ Titan Planet compiles your JavaScript/TypeScript into a native binary with an em
 
 - **No Node.js Event Loop** — Request/Response model
 - **No `require()`** — Use ES modules or bundled dependencies
+- **No async/await** — Use `drift()` for async operations
 - **True Isolation** — Each request is isolated
 - **Native Performance** — Rust + V8 combination
 
 This plugin helps catch incompatible code at lint time rather than runtime.
 
-## Related
-
-- [Titan Planet Documentation](https://titan-docs-ez.vercel.app/docs)
-- [@titanpl/core](https://www.npmjs.com/package/@titanpl/core) - Core Standard Library
+---
 
 ## License
 

@@ -1,12 +1,21 @@
 import { noNodeBuiltins } from './rules/no-node-builtins.js';
+import { noAsyncAwait } from './rules/no-async-await.js';
+import { driftOnlyTitanAsync } from './rules/drift-only-titan-async.js';
+import { requireDrift } from './rules/require-drift.js';
 import globals from 'globals';
 
 const plugin = {
     rules: {
-        'no-node-builtins': noNodeBuiltins
+        'no-node-builtins': noNodeBuiltins,
+        'no-async-await': noAsyncAwait,
+        'drift-only-titan-async': driftOnlyTitanAsync,
+        'require-drift': requireDrift
     }
 };
 
+/**
+ * Recommended configuration for TitanPL projects
+ */
 export const titanpl = {
     files: ['app/**/*.js'],
     plugins: {
@@ -18,12 +27,16 @@ export const titanpl = {
         globals: {
             ...globals.es2024,
             t: 'readonly',
-            Titan: 'readonly'
+            Titan: 'readonly',
+            drift: 'readonly'
         }
     },
     rules: {
         'no-undef': 'error',
-        'titanpl/no-node-builtins': 'error'
+        'titanpl/no-node-builtins': 'error',
+        'titanpl/no-async-await': 'error',
+        'titanpl/drift-only-titan-async': 'error',
+        'titanpl/require-drift': 'error'
     }
 };
 
