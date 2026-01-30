@@ -1,22 +1,10 @@
-import { isTitanAsyncMethod, isTitanCallee } from '../constants/titan-async-methods.js';
 import { buildMemberPath, isDriftCall } from '../utils/ast-helpers.js';
+import { isAsyncMethod } from '../utils/async-detector/index.js';
+import { isTitanCallee } from '../utils/is-titan-callee.js';
 
 /**
  * ESLint rule: drift-only-titan-async
  * Ensures drift() is only used with ASYNC TitanPL native methods.
- * 
- * This rule has HIGHER priority than drift-only-titan.
- * It performs a more specific check: not only must the method be from t/Titan,
- * but it must also be an async method.
- * 
- * If this rule cannot be applied (e.g., method list is incomplete),
- * drift-only-titan serves as a fallback.
- * 
- * ✓ drift(t.fetch('/api'))           - t.fetch is async
- * ✓ drift(t.core.fs.readFile('/f'))  - t.core.fs.readFile is async
- * ✗ drift(t.core.path.join('a','b')) - t.core.path.join is sync
- * ✗ drift(t.core.crypto.uuid())      - t.core.crypto.uuid is sync
- * ✗ drift(myCustomFunction())        - not a Titan method
  */
 export const driftOnlyTitanAsync = {
     meta: {
@@ -66,7 +54,7 @@ export const driftOnlyTitanAsync = {
                             return;
                         }
                     }
-                    
+
                     reportInvalidDriftUsage(context, node, getArgumentPreview(argument));
                     return;
                 }
@@ -86,9 +74,9 @@ export const driftOnlyTitanAsync = {
                     return;
                 }
 
-                // Second check (higher priority): must be an ASYNC Titan method
-                // If it's a Titan method but NOT async, report specific error
-                if (!isTitanAsyncMethod(methodPath)) {
+                // Second check: must be an ASYNC Titan method
+                // Pass context and argument node for type detection
+                if (!isAsyncMethod(methodPath, context, argument)) {
                     context.report({
                         node,
                         messageId: 'driftNotForSyncMethods',
@@ -127,20 +115,20 @@ function getArgumentPreview(argument) {
     switch (argument.type) {
         case 'Identifier':
             return argument.name;
-        
+
         case 'Literal':
             return String(argument.value);
-        
+
         case 'CallExpression':
             return buildMemberPath(argument.callee) || '<function call>';
-        
+
         case 'MemberExpression':
             return buildMemberPath(argument) || '<member access>';
-        
+
         case 'ArrowFunctionExpression':
         case 'FunctionExpression':
             return '<function>';
-        
+
         default:
             return '<expression>';
     }

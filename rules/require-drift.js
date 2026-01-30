@@ -1,5 +1,5 @@
-import { isTitanAsyncMethod } from '../constants/titan-async-methods.js';
 import { buildMemberPath, isDriftCall } from '../utils/ast-helpers.js';
+import { isAsyncMethod } from '../utils/async-detector/index.js';
 
 /**
  * ESLint rule: require-drift
@@ -35,12 +35,13 @@ export const requireDrift = {
                 }
 
                 const methodPath = buildMemberPath(node.callee);
-                
+
                 if (!methodPath) {
                     return;
                 }
 
-                if (isTitanAsyncMethod(methodPath)) {
+                // Pass context and node for type detection
+                if (isAsyncMethod(methodPath, context, node)) {
                     context.report({
                         node,
                         messageId: 'requireDrift',
@@ -62,7 +63,7 @@ export const requireDrift = {
  */
 function isWrappedInDrift(node) {
     const parent = node.parent;
-    
+
     if (!parent || parent.type !== 'CallExpression') {
         return false;
     }
@@ -71,6 +72,6 @@ function isWrappedInDrift(node) {
     if (isDriftCall(parent) && parent.arguments.includes(node)) {
         return true;
     }
-    
+
     return false;
 }

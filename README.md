@@ -56,6 +56,8 @@ export default [
 ];
 ```
 
+---
+
 ## Rules
 
 ### `titanpl/no-node-builtins`
@@ -110,7 +112,7 @@ function fetchData() {
 Ensures `drift()` is only used with **async** TitanPL native methods.
 
 1. The method must be from `t` or `Titan`
-2. The method must be asynchronous
+2. The method must be asynchronous (detected automatically from `.d.ts` files)
 
 #### ❌ Incorrect
 
@@ -167,6 +169,105 @@ t.core.crypto.uuid();
 
 ---
 
+## Async Method Detection
+
+The plugin **automatically detects** whether a Titan method is async or sync by reading `.d.ts` files. **No configuration required.**
+
+```
+1. DTS File Reader  →  Scans node_modules for .d.ts files
+                       Finds "declare namespace t" or "declare namespace Titan"
+                       Extracts methods that return Promise<T>
+         ↓ fallback
+2. Permissive Fallback  →  Unknown methods are treated as sync
+```
+
+### How It Works
+
+When you install a Titan library, the plugin automatically:
+
+1. Scans `node_modules/` for packages with `.d.ts` files
+2. Looks for `declare namespace t` or `declare namespace Titan` declarations
+3. Extracts methods and checks if they return `Promise<...>`
+4. Caches the results for performance
+
+### Example
+
+```typescript
+// node_modules/titan-websocket/index.d.ts
+declare namespace t {
+  namespace ws {
+    function connect(url: string): Promise<WebSocket>;  // Detected as async
+    function isConnected(): boolean;                     // Detected as sync
+  }
+}
+```
+
+The plugin will automatically detect `t.ws.connect` as async and `t.ws.isConnected` as sync.
+
+### Local Type Definitions
+
+You can also define types locally in your project. The plugin scans these locations:
+
+- `types/titan.d.ts`
+- `src/types/titan.d.ts`
+- `typings/titan.d.ts`
+- `titan.d.ts`
+
+### Fallback Behavior
+
+If a method is not found in any `.d.ts` file, it's treated as **sync** (permissive fallback). This means:
+
+- No false positives for libraries without type definitions
+- Add `.d.ts` files to enable accurate detection
+
+---
+
+## Third-Party Libraries
+
+Third-party Titan libraries should include a `.d.ts` file to enable automatic async detection.
+
+### For Library Authors
+
+Create a `.d.ts` file and reference it in `package.json`:
+
+```typescript
+// index.d.ts
+declare namespace t {
+  namespace ws {
+    function connect(url: string): Promise<WebSocket>;
+    function send(data: string): Promise<void>;
+    function close(): Promise<void>;
+    function isConnected(): boolean;
+  }
+}
+```
+
+```json
+// package.json
+{
+  "name": "titan-websocket",
+  "types": "./index.d.ts"
+}
+```
+
+### For Library Users
+
+Just install the library. The plugin detects async methods automatically:
+
+```bash
+npm install titan-websocket
+```
+
+```javascript
+// ✅ Plugin knows t.ws.connect is async
+drift(t.ws.connect('ws://example.com'));
+
+// ✅ Plugin knows t.ws.isConnected is sync
+const connected = t.ws.isConnected();
+```
+
+---
+
 ## Configurations
 
 ### Default (`titanpl`)
@@ -189,7 +290,7 @@ Rules enabled:
 
 ## Async vs Sync Titan Methods
 
-### Async Methods (require `drift()`)
+### Core Async Methods (require `drift()`)
 
 | Module | Methods |
 |--------|---------|
@@ -200,7 +301,7 @@ Rules enabled:
 | `t.core.time` | `sleep` |
 | `t.core.session` | `get`, `set`, `delete`, `clear` |
 
-### Sync Methods (do NOT need `drift()`)
+### Core Sync Methods (do NOT need `drift()`)
 
 | Module | Methods |
 |--------|---------|
@@ -215,6 +316,8 @@ Rules enabled:
 | `t.core.ls` | `get`, `set`, `remove`, `clear`, `keys` |
 | `t.core.cookies` | `get`, `set`, `delete` |
 
+> **Note:** These tables show the core Titan methods. Third-party libraries can extend `t` or `Titan` with additional methods. The plugin detects them automatically from `.d.ts` files.
+
 ---
 
 ## Error Messages
@@ -228,10 +331,11 @@ async functions are not allowed in TitanPL. Use drift() for async operations.
 .then() is not allowed in TitanPL. Use drift() for async operations.
 
 // drift-only-titan-async
-drift() should only be used with async TitanPL methods. "t.core.path.join" is a sync method and does not require drift().
+drift() should only be used with Titan (t.* or Titan.*) async method calls.
+drift() should not be used with sync Titan method "t.core.path.join". Remove the drift() wrapper.
 
 // require-drift
-"t.fetch" is async and must be wrapped with drift(). Use: drift(t.fetch(...))
+Async Titan method "t.fetch" must be wrapped in drift(). Use drift(t.fetch(...)) instead.
 ```
 
 ---
