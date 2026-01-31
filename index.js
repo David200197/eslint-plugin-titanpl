@@ -28,7 +28,9 @@ export const titanpl = {
             ...globals.es2024,
             t: 'readonly',
             Titan: 'readonly',
-            drift: 'readonly'
+            drift: 'readonly',
+            defineAction: 'readonly',
+            req: 'readonly'
         }
     },
     rules: {
