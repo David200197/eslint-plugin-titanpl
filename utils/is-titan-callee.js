@@ -1,8 +1,6 @@
-/**
- * Check if a callee starts with Titan globals (t or Titan)
- * @param {string} calleePath - The callee path
- * @returns {boolean}
- */
 export function isTitanCallee(calleePath) {
+    if (!calleePath || typeof calleePath !== 'string') {
+        return false;
+    }
     return calleePath.startsWith('t.') || calleePath.startsWith('Titan.');
 }

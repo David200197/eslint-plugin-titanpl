@@ -111,7 +111,7 @@ function fetchData() {
 
 Ensures `drift()` is only used with **async** TitanPL native methods.
 
-1. The method must be from `t` or `Titan`
+1. The method must be from `t` or `Titan` (including aliases)
 2. The method must be asynchronous (detected automatically from `.d.ts` files)
 
 #### ❌ Incorrect
@@ -126,6 +126,10 @@ drift(t.core.path.join('a', 'b'));     // path.join is sync
 drift(t.core.url.parse('http://...'));  // url.parse is sync
 drift(t.core.crypto.uuid());            // uuid is sync
 drift(t.core.os.platform());            // os.platform is sync
+
+// Sync aliases (don't need drift)
+const { join } = t.core.path;
+drift(join('a', 'b'));                  // join is alias of sync method
 ```
 
 #### ✅ Correct
@@ -139,6 +143,13 @@ drift(t.core.crypto.hash('data'));
 drift(t.core.time.sleep(1000));
 drift(t.core.net.resolveDNS('example.com'));
 drift(t.core.session.get('key'));
+
+// Async aliases
+const { fetch } = t;
+drift(fetch('/api'));                   // fetch is alias of async method
+
+const { readFile } = t.core.fs;
+drift(readFile('/file'));               // readFile is alias of async method
 ```
 
 ---
@@ -153,6 +164,13 @@ Requires `drift()` wrapper for async TitanPL native methods. Complements `drift-
 t.fetch('/api/data');              // Missing drift()
 t.core.fs.readFile('/file');       // Missing drift()
 t.core.crypto.hash('data');        // Missing drift()
+
+// Aliases without drift()
+const { fetch } = t;
+fetch('/api/data');                // Missing drift()
+
+const { readFile } = t.core.fs;
+readFile('/file');                 // Missing drift()
 ```
 
 #### ✅ Correct
@@ -165,30 +183,48 @@ drift(t.core.crypto.hash('data'));
 // Sync methods don't need drift
 t.core.path.join('a', 'b');
 t.core.crypto.uuid();
+
+// Aliases with drift()
+const { fetch } = t;
+drift(fetch('/api/data'));
+
+const { readFile } = t.core.fs;
+drift(readFile('/file'));
+
+// Sync aliases don't need drift
+const { join } = t.core.path;
+join('a', 'b');
 ```
 
 ---
 
 ## Async Method Detection
 
-The plugin **automatically detects** whether a Titan method is async or sync by reading `.d.ts` files. **No configuration required.**
+The plugin **automatically detects** whether a Titan method is async or sync by reading `.d.ts` files and scanning your project. **No configuration required.**
 
 ```
 1. DTS File Reader  →  Scans node_modules for .d.ts files
+                       Scans project recursively for .d.ts files
                        Finds "declare namespace t" or "declare namespace Titan"
                        Extracts methods that return Promise<T>
+         ↓
+2. Alias Detection  →  Detects destructuring: const { fetch } = t
+                       Detects declare global: declare global { const fetch: typeof t.fetch }
+                       Detects exports: export const fetch = t.fetch
          ↓ fallback
-2. Permissive Fallback  →  Unknown methods are treated as sync
+3. Permissive Fallback  →  Unknown methods are treated as sync
 ```
 
 ### How It Works
 
-When you install a Titan library, the plugin automatically:
+When you run ESLint, the plugin automatically:
 
 1. Scans `node_modules/` for packages with `.d.ts` files
-2. Looks for `declare namespace t` or `declare namespace Titan` declarations
-3. Extracts methods and checks if they return `Promise<...>`
-4. Caches the results for performance
+2. Scans your project recursively for `.d.ts` and source files
+3. Looks for `declare namespace t` or `declare namespace Titan` declarations
+4. Extracts methods and checks if they return `Promise<...>`
+5. Detects aliases from destructuring, declare global, and exports
+6. Caches the results for performance
 
 ### Example
 
@@ -204,14 +240,108 @@ declare namespace t {
 
 The plugin will automatically detect `t.ws.connect` as async and `t.ws.isConnected` as sync.
 
+---
+
+## Alias Detection
+
+The plugin detects when Titan methods are aliased and tracks them correctly. This works for three patterns:
+
+### 1. Destructuring
+
+```javascript
+// The plugin detects these aliases
+const { fetch } = t;
+const { readFile, writeFile } = t.core.fs;
+const { join: pathJoin } = t.core.path;
+const { core: { fs } } = t;
+
+// And enforces rules correctly
+drift(fetch('/api'));           // ✅ fetch is alias of async t.fetch
+drift(readFile('/file'));       // ✅ readFile is alias of async t.core.fs.readFile
+pathJoin('a', 'b');             // ✅ pathJoin is alias of sync t.core.path.join (no drift needed)
+drift(pathJoin('a', 'b'));      // ❌ Error: sync method doesn't need drift
+```
+
+### 2. Declare Global
+
+```typescript
+// types/globals.d.ts
+declare global {
+  // Function with TitanCore return type
+  function fetch(url: string): Promise<TitanCore.Response>;
+  
+  // Const referencing Titan method
+  const myFetch: typeof t.fetch;
+  
+  // Interface with Titan types
+  interface App {
+    fetch: TitanCore.Fetch;
+  }
+}
+```
+
+```javascript
+// The plugin tracks these globals
+drift(fetch('/api'));           // ✅ Global fetch detected as async
+drift(myFetch('/api'));         // ✅ myFetch is alias of async t.fetch
+```
+
+### 3. Exports
+
+```typescript
+// utils/titan-helpers.ts
+export const fetch = t.fetch;
+export const readFile = t.core.fs.readFile;
+export const pathJoin = t.core.path.join;
+
+// Or with types
+export type { Fetch } = typeof t.fetch;
+```
+
+```javascript
+// The plugin tracks exported aliases
+import { fetch, readFile, pathJoin } from './utils/titan-helpers';
+
+drift(fetch('/api'));           // ✅ fetch is alias of async t.fetch
+drift(readFile('/file'));       // ✅ readFile is alias of async t.core.fs.readFile
+pathJoin('a', 'b');             // ✅ pathJoin is alias of sync method (no drift needed)
+```
+
+---
+
+## Project Scanning
+
+The plugin scans your entire project for `.d.ts` files and source files to detect Titan types and aliases.
+
+### Scanned Locations
+
+| Source | What's Scanned |
+|--------|----------------|
+| `node_modules/` | Packages with `.d.ts` files containing Titan declarations |
+| Project root | All `.d.ts` files recursively |
+| Source files | `.js`, `.ts`, `.mjs` files for destructuring patterns |
+
+### Skipped Directories
+
+The following directories are automatically skipped:
+
+- `node_modules/` (scanned separately for packages)
+- `.git/`, `.svn/`
+- `dist/`, `build/`
+- `coverage/`
+- `.next/`, `.nuxt/`, `.output/`
+- `vendor/`
+- `.cache/`
+
 ### Local Type Definitions
 
-You can also define types locally in your project. The plugin scans these locations:
+You can define types anywhere in your project. Common locations:
 
 - `types/titan.d.ts`
 - `src/types/titan.d.ts`
 - `typings/titan.d.ts`
 - `titan.d.ts`
+- Any `.d.ts` file in your project
 
 ### Fallback Behavior
 
@@ -264,6 +394,11 @@ drift(t.ws.connect('ws://example.com'));
 
 // ✅ Plugin knows t.ws.isConnected is sync
 const connected = t.ws.isConnected();
+
+// ✅ Works with destructuring too
+const { connect, isConnected } = t.ws;
+drift(connect('ws://example.com'));
+const connected = isConnected();
 ```
 
 ---
@@ -333,9 +468,11 @@ async functions are not allowed in TitanPL. Use drift() for async operations.
 // drift-only-titan-async
 drift() should only be used with Titan (t.* or Titan.*) async method calls.
 drift() should not be used with sync Titan method "t.core.path.join". Remove the drift() wrapper.
+drift() should not be used with sync Titan method "pathJoin". Remove the drift() wrapper.
 
 // require-drift
 Async Titan method "t.fetch" must be wrapped in drift(). Use drift(t.fetch(...)) instead.
+Async Titan method "fetch" must be wrapped in drift(). Use drift(fetch(...)) instead.
 ```
 
 ---
@@ -351,6 +488,23 @@ Titan Planet compiles your JavaScript/TypeScript into a native binary with an em
 - **Native Performance** — Rust + V8 combination
 
 This plugin helps catch incompatible code at lint time rather than runtime.
+
+---
+
+## Changelog
+
+### v2.1.0
+
+- **Project scanning**: Now scans entire project recursively for `.d.ts` files
+- **Alias detection**: Detects destructuring (`const { fetch } = t`)
+- **Declare global support**: Detects `declare global { const fetch: typeof t.fetch }`
+- **Export detection**: Detects `export const fetch = t.fetch`
+- **Improved reliability**: Better null handling in `isTitanCallee()`
+
+### v2.0.0
+
+- Initial DTS file checker for automatic async method detection
+- Scans `node_modules/` for Titan type definitions
 
 ---
 

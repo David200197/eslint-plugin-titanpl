@@ -1,13 +1,24 @@
 /**
  * Tests for drift-only-titan-async rule
  * Uses direct mocking of the async detector (DTS File Checker)
+ * 
+ * Includes tests for:
+ * - Direct Titan method calls
+ * - Destructured aliases: const { fetch } = t
+ * - Declare global aliases: declare global { const fetch: typeof t.fetch }
+ * - Export aliases: export const fetch = t.fetch
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-// Define which methods are async/sync for testing
-// This simulates what the DTS File Checker would find in .d.ts files
+// =============================================================================
+// MOCK DATA - Simulates what DTS File Checker would find
+// =============================================================================
+
+/**
+ * Async methods found in .d.ts files
+ */
 const ASYNC_METHODS = new Set([
     't.fetch',
     'Titan.fetch',
@@ -29,8 +40,13 @@ const ASYNC_METHODS = new Set([
     't.core.session.set',
     't.core.session.delete',
     't.core.session.clear',
+    't.ws.connect',
+    't.db.query',
 ]);
 
+/**
+ * Sync methods found in .d.ts files
+ */
 const SYNC_METHODS = new Set([
     't.core.path.join',
     't.core.path.resolve',
@@ -67,7 +83,42 @@ const SYNC_METHODS = new Set([
     't.core.cookies.get',
     't.core.cookies.set',
     't.core.cookies.delete',
+    't.log',
 ]);
+
+/**
+ * Aliases detected from:
+ * - Destructuring: const { fetch } = t
+ * - Declare global: declare global { const myFetch: typeof t.fetch }
+ * - Exports: export const fetch = t.fetch
+ * 
+ * Map<aliasName, { originalPath, source }>
+ */
+const ALIASES = new Map([
+    // Destructuring aliases
+    ['fetch', { originalPath: 't.fetch', source: 'destructuring' }],
+    ['readFile', { originalPath: 't.core.fs.readFile', source: 'destructuring' }],
+    ['writeFile', { originalPath: 't.core.fs.writeFile', source: 'destructuring' }],
+    ['pathJoin', { originalPath: 't.core.path.join', source: 'destructuring' }],
+    ['sleep', { originalPath: 't.core.time.sleep', source: 'destructuring' }],
+    ['log', { originalPath: 't.log', source: 'destructuring' }],
+    ['wsConnect', { originalPath: 't.ws.connect', source: 'destructuring' }],
+
+    // Declare global aliases
+    ['globalFetch', { originalPath: 't.fetch', source: 'declare-global' }],
+    ['globalReadFile', { originalPath: 't.core.fs.readFile', source: 'declare-global' }],
+    ['globalPathJoin', { originalPath: 't.core.path.join', source: 'declare-global' }],
+
+    // Export aliases
+    ['exportedFetch', { originalPath: 't.fetch', source: 'export' }],
+    ['exportedReadFile', { originalPath: 't.core.fs.readFile', source: 'export' }],
+    ['exportedPathJoin', { originalPath: 't.core.path.join', source: 'export' }],
+    ['dbQuery', { originalPath: 't.db.query', source: 'export' }],
+]);
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
 
 /**
  * Build member path from AST node
@@ -91,22 +142,69 @@ function isTitanCallee(path) {
 }
 
 /**
+ * Resolve alias to original Titan path
+ * @param {string} name - Method name or path
+ * @returns {{ resolvedPath: string, wasAlias: boolean, aliasSource: string | null }}
+ */
+function resolveAlias(name) {
+    // Direct Titan path
+    if (isTitanCallee(name)) {
+        return { resolvedPath: name, wasAlias: false, aliasSource: null };
+    }
+
+    // Check for alias
+    const alias = ALIASES.get(name);
+    if (alias) {
+        return {
+            resolvedPath: alias.originalPath,
+            wasAlias: true,
+            aliasSource: alias.source
+        };
+    }
+
+    return { resolvedPath: name, wasAlias: false, aliasSource: null };
+}
+
+/**
  * Mock detectAsyncMethod for testing
- * Simulates the DTS File Checker behavior
+ * Simulates the DTS File Checker behavior with alias resolution
  */
 function mockDetectAsyncMethod(methodPath) {
-    if (!isTitanCallee(methodPath)) {
+    // First resolve any alias
+    const { resolvedPath } = resolveAlias(methodPath);
+
+    if (!isTitanCallee(resolvedPath)) {
         return { isAsync: false, source: null, returnType: null };
     }
-    if (ASYNC_METHODS.has(methodPath)) {
+    if (ASYNC_METHODS.has(resolvedPath)) {
         return { isAsync: true, source: 'dts-file', returnType: 'Promise<any>' };
     }
-    if (SYNC_METHODS.has(methodPath)) {
+    if (SYNC_METHODS.has(resolvedPath)) {
         return { isAsync: false, source: 'dts-file', returnType: 'string' };
     }
     // Unknown Titan method - fallback permissive (not found in any .d.ts)
     return { isAsync: false, source: 'fallback', returnType: null };
 }
+
+/**
+ * Check if a callee is or resolves to a Titan method
+ */
+function checkTitanCallee(calleePath) {
+    if (isTitanCallee(calleePath)) {
+        return { isTitan: true, resolvedPath: calleePath };
+    }
+
+    const { resolvedPath, wasAlias } = resolveAlias(calleePath);
+    if (wasAlias && isTitanCallee(resolvedPath)) {
+        return { isTitan: true, resolvedPath };
+    }
+
+    return { isTitan: false, resolvedPath: null };
+}
+
+// =============================================================================
+// RULE IMPLEMENTATION (for testing)
+// =============================================================================
 
 /**
  * Create rule implementation for testing
@@ -136,8 +234,19 @@ function createRule() {
                         return;
                     }
 
+                    // Handle identifier that could be an alias
                     if (arg.type === 'Identifier') {
-                        context.report({ node, messageId: 'driftOnlyForTitanAsync' });
+                        const { isTitan } = checkTitanCallee(arg.name);
+                        if (!isTitan) {
+                            context.report({ node, messageId: 'driftOnlyForTitanAsync' });
+                        } else {
+                            // It's a Titan alias but not a call
+                            context.report({
+                                node,
+                                messageId: 'driftRequiresCall',
+                                data: { method: arg.name }
+                            });
+                        }
                         return;
                     }
 
@@ -156,13 +265,23 @@ function createRule() {
                         return;
                     }
 
-                    const methodPath = buildMemberPath(arg.callee);
+                    // Get the callee - could be Identifier (alias) or MemberExpression
+                    let methodPath;
+                    if (arg.callee.type === 'Identifier') {
+                        methodPath = arg.callee.name;
+                    } else {
+                        methodPath = buildMemberPath(arg.callee);
+                    }
 
-                    if (!methodPath || !isTitanCallee(methodPath)) {
+                    // Check if it's a Titan method (direct or via alias)
+                    const { isTitan, resolvedPath } = checkTitanCallee(methodPath);
+
+                    if (!isTitan) {
                         context.report({ node, messageId: 'driftOnlyForTitanAsync' });
                         return;
                     }
 
+                    // Check if async using resolved path
                     const detection = mockDetectAsyncMethod(methodPath);
 
                     if (!detection.isAsync) {
@@ -178,6 +297,10 @@ function createRule() {
     };
 }
 
+// =============================================================================
+// PARSER
+// =============================================================================
+
 /**
  * Parse code to AST node
  */
@@ -190,6 +313,31 @@ function parseCode(code) {
         };
     }
 
+    // drift(aliasRef) - reference to alias without calling
+    const aliasRefMatch = code.match(/^drift\(([a-zA-Z_][a-zA-Z0-9_]*)\);$/);
+    if (aliasRefMatch && ALIASES.has(aliasRefMatch[1])) {
+        return {
+            type: 'CallExpression',
+            callee: { type: 'Identifier', name: 'drift' },
+            arguments: [{ type: 'Identifier', name: aliasRefMatch[1] }]
+        };
+    }
+
+    // drift(alias()) - alias function call
+    const aliasCallMatch = code.match(/^drift\(([a-zA-Z_][a-zA-Z0-9_]*)\(.*?\)\);$/);
+    if (aliasCallMatch && ALIASES.has(aliasCallMatch[1])) {
+        return {
+            type: 'CallExpression',
+            callee: { type: 'Identifier', name: 'drift' },
+            arguments: [{
+                type: 'CallExpression',
+                callee: { type: 'Identifier', name: aliasCallMatch[1] },
+                arguments: []
+            }]
+        };
+    }
+
+    // drift(t.method) - reference without call
     const refMatch = code.match(/^drift\(([tT](?:itan)?(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\);$/);
     if (refMatch) {
         const parts = refMatch[1].split('.');
@@ -208,6 +356,7 @@ function parseCode(code) {
         };
     }
 
+    // drift(t.method()) - Titan call
     const titanCallMatch = code.match(/^drift\(([tT](?:itan)?(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\(.*?\)\);$/);
     if (titanCallMatch) {
         const parts = titanCallMatch[1].split('.');
@@ -230,8 +379,9 @@ function parseCode(code) {
         };
     }
 
+    // drift(func()) - non-Titan function call
     const funcMatch = code.match(/^drift\(([a-zA-Z_][a-zA-Z0-9_]*)\(.*?\)\);$/);
-    if (funcMatch && !funcMatch[1].match(/^[tT](itan)?$/)) {
+    if (funcMatch && !funcMatch[1].match(/^[tT](itan)?$/) && !ALIASES.has(funcMatch[1])) {
         return {
             type: 'CallExpression',
             callee: { type: 'Identifier', name: 'drift' },
@@ -243,6 +393,7 @@ function parseCode(code) {
         };
     }
 
+    // drift(module.method()) - non-Titan module call
     const moduleMatch = code.match(/^drift\(([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\(.*?\)\);$/);
     if (moduleMatch && !moduleMatch[1].match(/^[tT](itan)?$/)) {
         return {
@@ -260,6 +411,7 @@ function parseCode(code) {
         };
     }
 
+    // drift(variable) - variable reference
     const varMatch = code.match(/^drift\(([a-zA-Z_][a-zA-Z0-9_]*)\);$/);
     if (varMatch) {
         return {
@@ -269,6 +421,7 @@ function parseCode(code) {
         };
     }
 
+    // drift(() => {}) or drift(function() {})
     if (code.includes('() =>') || code.includes('function()')) {
         return {
             type: 'CallExpression',
@@ -280,6 +433,7 @@ function parseCode(code) {
         };
     }
 
+    // drift(literal)
     const literalMatch = code.match(/^drift\((['"].*?['"]|\d+|true|false|null)\);$/);
     if (literalMatch) {
         return {
@@ -289,6 +443,7 @@ function parseCode(code) {
         };
     }
 
+    // drift({}) or drift([])
     if (code === 'drift({});') {
         return {
             type: 'CallExpression',
@@ -317,7 +472,15 @@ function runRule(code) {
     return reports;
 }
 
+// =============================================================================
+// TESTS
+// =============================================================================
+
 describe('drift-only-titan-async', () => {
+
+    // =========================================================================
+    // VALID: Direct Titan async methods with drift
+    // =========================================================================
     describe('valid: async Titan methods with drift', () => {
         const codes = [
             `drift(t.fetch('/api'));`,
@@ -336,6 +499,8 @@ describe('drift-only-titan-async', () => {
             `drift(t.core.time.sleep(1000));`,
             `drift(t.core.session.get('key'));`,
             `drift(t.core.session.set('key', 'value'));`,
+            `drift(t.ws.connect('wss://example.com'));`,
+            `drift(t.db.query('SELECT 1'));`,
         ];
         for (const code of codes) {
             it(`should pass: ${code}`, () => {
@@ -345,6 +510,71 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // VALID: Destructured aliases with drift (async methods)
+    // =========================================================================
+    describe('valid: destructured async aliases with drift', () => {
+        const codes = [
+            // const { fetch } = t; drift(fetch('/api'));
+            `drift(fetch('/api'));`,
+            // const { readFile } = t.core.fs; drift(readFile('/file'));
+            `drift(readFile('/file'));`,
+            // const { writeFile } = t.core.fs; drift(writeFile('/file', 'data'));
+            `drift(writeFile('/file', 'data'));`,
+            // const { sleep } = t.core.time; drift(sleep(1000));
+            `drift(sleep(1000));`,
+            // const { connect: wsConnect } = t.ws; drift(wsConnect('wss://...'));
+            `drift(wsConnect('wss://example.com'));`,
+        ];
+        for (const code of codes) {
+            it(`should pass: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 0, `Expected no errors for: ${code}`);
+            });
+        }
+    });
+
+    // =========================================================================
+    // VALID: Declare global aliases with drift (async methods)
+    // =========================================================================
+    describe('valid: declare global async aliases with drift', () => {
+        const codes = [
+            // declare global { const globalFetch: typeof t.fetch }
+            `drift(globalFetch('/api'));`,
+            // declare global { const globalReadFile: typeof t.core.fs.readFile }
+            `drift(globalReadFile('/file'));`,
+        ];
+        for (const code of codes) {
+            it(`should pass: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 0, `Expected no errors for: ${code}`);
+            });
+        }
+    });
+
+    // =========================================================================
+    // VALID: Export aliases with drift (async methods)
+    // =========================================================================
+    describe('valid: exported async aliases with drift', () => {
+        const codes = [
+            // export const exportedFetch = t.fetch;
+            `drift(exportedFetch('/api'));`,
+            // export const exportedReadFile = t.core.fs.readFile;
+            `drift(exportedReadFile('/file'));`,
+            // export const dbQuery = t.db.query;
+            `drift(dbQuery('SELECT 1'));`,
+        ];
+        for (const code of codes) {
+            it(`should pass: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 0, `Expected no errors for: ${code}`);
+            });
+        }
+    });
+
+    // =========================================================================
+    // INVALID: drift without argument
+    // =========================================================================
     describe('invalid: drift without argument', () => {
         it('should fail: drift();', () => {
             const reports = runRule('drift();');
@@ -353,8 +583,16 @@ describe('drift-only-titan-async', () => {
         });
     });
 
+    // =========================================================================
+    // INVALID: drift with method reference (not called)
+    // =========================================================================
     describe('invalid: drift with method reference', () => {
-        for (const code of ['drift(t.fetch);', 'drift(t.core.fs.readFile);', 'drift(Titan.fetch);']) {
+        const codes = [
+            'drift(t.fetch);',
+            'drift(t.core.fs.readFile);',
+            'drift(Titan.fetch);',
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -363,8 +601,35 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with alias reference (not called)
+    // =========================================================================
+    describe('invalid: drift with alias reference (not called)', () => {
+        const codes = [
+            // const { fetch } = t; drift(fetch); // missing ()
+            'drift(fetch);',
+            // const { readFile } = t.core.fs; drift(readFile);
+            'drift(readFile);',
+        ];
+        for (const code of codes) {
+            it(`should fail: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 1);
+                assert.strictEqual(reports[0].messageId, 'driftRequiresCall');
+            });
+        }
+    });
+
+    // =========================================================================
+    // INVALID: drift with non-Titan function
+    // =========================================================================
     describe('invalid: drift with non-Titan function', () => {
-        for (const code of ['drift(myFunction());', 'drift(someModule.method());', 'drift(console.log());']) {
+        const codes = [
+            'drift(myFunction());',
+            'drift(someModule.method());',
+            'drift(console.log());',
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -373,8 +638,16 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with unknown variable
+    // =========================================================================
     describe('invalid: drift with variable', () => {
-        for (const code of ['drift(someVariable);', 'drift(unknownRef);', 'drift(promise);']) {
+        const codes = [
+            'drift(someVariable);',
+            'drift(unknownRef);',
+            'drift(promise);',
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -383,8 +656,16 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with function expression
+    // =========================================================================
     describe('invalid: drift with function expression', () => {
-        for (const code of ['drift(() => {});', 'drift(function() {});', 'drift(async () => {});']) {
+        const codes = [
+            'drift(() => {});',
+            'drift(function() {});',
+            'drift(async () => {});',
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -393,6 +674,9 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with SYNC Titan methods (direct)
+    // =========================================================================
     describe('invalid: drift with SYNC Titan methods', () => {
         const codes = [
             `drift(t.core.path.join('a', 'b'));`,
@@ -415,6 +699,7 @@ describe('drift-only-titan-async', () => {
             `drift(t.core.ls.get('key'));`,
             `drift(t.core.ls.set('key', 'val'));`,
             `drift(t.core.cookies.get('token'));`,
+            `drift(t.log('message'));`,
         ];
         for (const code of codes) {
             it(`should fail: ${code}`, () => {
@@ -425,8 +710,71 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with SYNC aliases (destructured)
+    // =========================================================================
+    describe('invalid: drift with SYNC destructured aliases', () => {
+        const codes = [
+            // const { join: pathJoin } = t.core.path; drift(pathJoin('a', 'b'));
+            `drift(pathJoin('a', 'b'));`,
+            // const { log } = t; drift(log('msg'));
+            `drift(log('message'));`,
+        ];
+        for (const code of codes) {
+            it(`should fail: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 1, `Expected error for: ${code}`);
+                assert.strictEqual(reports[0].messageId, 'driftNotForSyncMethods');
+            });
+        }
+    });
+
+    // =========================================================================
+    // INVALID: drift with SYNC aliases (declare global)
+    // =========================================================================
+    describe('invalid: drift with SYNC declare global aliases', () => {
+        const codes = [
+            // declare global { const globalPathJoin: typeof t.core.path.join }
+            `drift(globalPathJoin('a', 'b'));`,
+        ];
+        for (const code of codes) {
+            it(`should fail: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 1, `Expected error for: ${code}`);
+                assert.strictEqual(reports[0].messageId, 'driftNotForSyncMethods');
+            });
+        }
+    });
+
+    // =========================================================================
+    // INVALID: drift with SYNC aliases (export)
+    // =========================================================================
+    describe('invalid: drift with SYNC exported aliases', () => {
+        const codes = [
+            // export const exportedPathJoin = t.core.path.join;
+            `drift(exportedPathJoin('a', 'b'));`,
+        ];
+        for (const code of codes) {
+            it(`should fail: ${code}`, () => {
+                const reports = runRule(code);
+                assert.strictEqual(reports.length, 1, `Expected error for: ${code}`);
+                assert.strictEqual(reports[0].messageId, 'driftNotForSyncMethods');
+            });
+        }
+    });
+
+    // =========================================================================
+    // INVALID: drift with literals
+    // =========================================================================
     describe('invalid: drift with literals', () => {
-        for (const code of [`drift('string');`, `drift(123);`, `drift(true);`, `drift(false);`, `drift(null);`]) {
+        const codes = [
+            `drift('string');`,
+            `drift(123);`,
+            `drift(true);`,
+            `drift(false);`,
+            `drift(null);`,
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -435,8 +783,15 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // INVALID: drift with objects/arrays
+    // =========================================================================
     describe('invalid: drift with objects/arrays', () => {
-        for (const code of [`drift({});`, `drift([]);`]) {
+        const codes = [
+            `drift({});`,
+            `drift([]);`,
+        ];
+        for (const code of codes) {
             it(`should fail: ${code}`, () => {
                 const reports = runRule(code);
                 assert.strictEqual(reports.length, 1);
@@ -445,8 +800,11 @@ describe('drift-only-titan-async', () => {
         }
     });
 
+    // =========================================================================
+    // FALLBACK BEHAVIOR
+    // =========================================================================
     describe('fallback behavior', () => {
-        it('should allow drift with unknown Titan method (fallback permissive)', () => {
+        it('should fail drift with unknown Titan method (fallback permissive = sync)', () => {
             // Unknown methods fall through to fallback which returns isAsync: false
             // So drift(t.unknown.method()) should fail because it's treated as sync
             const reports = runRule(`drift(t.unknown.newMethod());`);
