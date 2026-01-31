@@ -436,8 +436,14 @@ function parseDtsFile(filePath) {
  * @param {string} content
  */
 function parseSourceFileAliases(content) {
-    // Skip if no t or Titan reference
-    if (!content.includes('t.') && !content.includes('Titan.')) {
+    // Skip if no reference to Titan globals
+    const hasTitanReference =
+        content.includes('t.') ||
+        content.includes('Titan.') ||
+        /}\s*=\s*t\b/.test(content) ||
+        /}\s*=\s*Titan\b/.test(content);
+
+    if (!hasTitanReference) {
         return;
     }
 
