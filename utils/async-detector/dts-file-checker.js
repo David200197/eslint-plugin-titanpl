@@ -54,7 +54,9 @@ const dtsCache = {
     /** @type {boolean} */
     initialized: false,
     /** @type {string | null} */
-    projectRoot: null
+    projectRoot: null,
+    /** @type {string | null} */
+    _lastParsedFile: null
 };
 
 /**
@@ -437,13 +439,12 @@ function parseDtsFile(filePath) {
  */
 function parseSourceFileAliases(content) {
     // Skip if no reference to Titan globals
-    const hasTitanReference =
-        content.includes('t.') ||
-        content.includes('Titan.') ||
-        /}\s*=\s*t\b/.test(content) ||
-        /}\s*=\s*Titan\b/.test(content);
-
-    if (!hasTitanReference) {
+    if (
+        !content.includes('t.') &&
+        !content.includes('Titan.') &&
+        !content.includes('= t') &&
+        !content.includes('=t')
+    ) {
         return;
     }
 
@@ -822,6 +823,30 @@ function resolveMethodPath(path) {
     };
 }
 
+/**
+ * Parse aliases from the current file being linted (via ESLint context).
+ * This handles inline aliases that the disk scanner might miss.
+ * @param {Object} context - ESLint rule context
+ */
+function parseCurrentFileSource(context) {
+    const filename = context.getFilename?.() || context.filename || '';
+    if (dtsCache._lastParsedFile === filename) return;
+
+    try {
+        const sourceCode = context.sourceCode
+            || (typeof context.getSourceCode === 'function' ? context.getSourceCode() : null);
+        if (!sourceCode) return;
+
+        const text = typeof sourceCode.getText === 'function' ? sourceCode.getText() : '';
+        if (!text) return;
+
+        parseSourceFileAliases(text);
+        dtsCache._lastParsedFile = filename;
+    } catch {
+        // Ignore errors
+    }
+}
+
 // =============================================================================
 // PUBLIC API
 // =============================================================================
@@ -878,6 +903,7 @@ export function checkForAlias(name, context) {
         }
 
         initializeCache(projectRoot);
+        parseCurrentFileSource(context)
 
         // 1. Direct alias lookup (myFetch -> t.fetch)
         const alias = dtsCache.aliases.get(name);
@@ -936,6 +962,7 @@ export function resolveAlias(methodPath, context) {
         }
 
         initializeCache(projectRoot);
+        parseCurrentFileSource(context);
 
         // Direct Titan path
         if (isTitanPath(methodPath)) {
@@ -976,6 +1003,7 @@ export function clearDtsCache() {
     dtsCache.interfaces.clear();
     dtsCache.initialized = false;
     dtsCache.projectRoot = null;
+    dtsCache._lastParsedFile = null;
 }
 
 /**

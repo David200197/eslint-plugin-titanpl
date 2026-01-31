@@ -652,4 +652,44 @@ describe('drift-only-titan-async (real)', () => {
             assert.strictEqual(errs[0].messageId, 'driftOnlyForTitanAsync');
         });
     });
+    // =========================================================================
+    // VALID: Inline destructuring in the same code being linted
+    // =========================================================================
+    describe('valid: inline destructuring aliases', () => {
+        it('should resolve inline const { fetch } = t', () => {
+            const code = `
+            const { fetch } = t;
+            drift(fetch('/api'));
+        `;
+            const errs = ruleErrors(lint(code));
+            assert.strictEqual(errs.length, 0, 'inline destructured alias should be resolved');
+        });
+
+        it('should resolve inline const { readFile } = t.core.fs', () => {
+            const code = `
+            const { readFile } = t.core.fs;
+            drift(readFile('/file'));
+        `;
+            const errs = ruleErrors(lint(code));
+            assert.strictEqual(errs.length, 0, 'inline destructured alias with path should be resolved');
+        });
+
+        it('should resolve inline const myFetch = t.fetch', () => {
+            const code = `
+            const myFetch = t.fetch;
+            drift(myFetch('/api'));
+        `;
+            const errs = ruleErrors(lint(code));
+            assert.strictEqual(errs.length, 0, 'inline simple assignment alias should be resolved');
+        });
+
+        it('should resolve inline const db = t.db; drift(db.query(...))', () => {
+            const code = `
+            const db = t.db;
+            drift(db.query('SELECT 1'));
+        `;
+            const errs = ruleErrors(lint(code));
+            assert.strictEqual(errs.length, 0, 'inline module alias should be resolved');
+        });
+    });
 });

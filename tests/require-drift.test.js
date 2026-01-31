@@ -670,4 +670,18 @@ describe('require-drift (real)', () => {
             assert.strictEqual(errs.length, 0);
         });
     });
+    // =========================================================================
+    // INVALID: Inline destructured async aliases WITHOUT drift
+    // =========================================================================
+    describe('invalid: inline destructured async aliases without drift', () => {
+        it('should require drift for inline const { fetch } = t', () => {
+            const code = `
+            const { fetch } = t;
+            fetch('/api');
+        `;
+            const errs = ruleErrors(lint(code));
+            assert.strictEqual(errs.length, 1, 'inline destructured async alias should require drift');
+            assert.strictEqual(errs[0].messageId, 'requireDrift');
+        });
+    });
 });
