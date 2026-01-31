@@ -17,7 +17,7 @@ const plugin = {
  * Recommended configuration for TitanPL projects
  */
 export const titanpl = {
-    files: ['app/**/*.js'],
+    files: ['app/**/*.js', 'app/**/*.ts'],
     ignores: ['**/*.d.ts'],
     plugins: {
         titanpl: plugin
