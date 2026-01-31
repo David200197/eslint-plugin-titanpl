@@ -1,14 +1,24 @@
 /**
- * DTS File Checker - Enhanced Version
+ * DTS File Checker - Complete Version
  * 
  * Reads .d.ts files to detect Titan async methods.
  * 
- * Features:
- * - Scans node_modules for packages with Titan type definitions
- * - Scans project files recursively for .d.ts files
- * - Detects destructuring: const { fetch } = t
- * - Detects declare global with Titan types
- * - Detects exports of Titan properties
+ * Supports ALL declaration styles:
+ * 1. declare namespace t { ... }
+ * 2. declare global { const t: TitanRuntimeUtils; interface TitanRuntimeUtils { ... } }
+ * 3. Nested namespace references (TitanCore.FileSystem)
+ * 
+ * Alias Detection (ALL cases):
+ * 1. Destructuring simple: const { fetch } = t
+ * 2. Destructuring rename: const { fetch: myFetch } = t
+ * 3. Destructuring path: const { readFile } = t.core.fs
+ * 4. Simple assignment: const myFetch = t.fetch
+ * 5. Module assignment: const db = t.db (then db.query() resolves to t.db.query)
+ * 6. Export assignment: export const myFetch = t.fetch
+ * 7. Export module: export const db = t.db
+ * 8. Export object: export const db = { query: t.db.query }
+ * 9. Object inline: const utils = { fetch: t.fetch }
+ * 10. Declare global typeof: declare global { const myFetch: typeof t.fetch }
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
@@ -22,28 +32,28 @@ import { resolve, join, dirname, extname } from 'path';
  * @typedef {Object} MethodInfo
  * @property {boolean} isAsync - Whether the method is async
  * @property {string | null} returnType - The return type
- * @property {string} [aliasOf] - Original method path if this is an alias
  */
 
 /**
  * @typedef {Object} AliasInfo
- * @property {string} originalPath - Original Titan path (e.g., 't.fetch')
- * @property {'destructuring' | 'declare-global' | 'export'} source - How the alias was created
+ * @property {string} originalPath - Original Titan path (e.g., 't.fetch' or 't.db' for modules)
+ * @property {'destructuring' | 'assignment' | 'export' | 'object-property' | 'declare-global'} source
+ * @property {boolean} [isModule] - True if this alias points to a module (not a method)
  */
 
 /**
  * Cache for parsed .d.ts files
- * @type {{ 
- *   methods: Map<string, MethodInfo>, 
- *   aliases: Map<string, AliasInfo>,
- *   initialized: boolean, 
- *   projectRoot: string | null 
- * }}
  */
 const dtsCache = {
+    /** @type {Map<string, MethodInfo>} */
     methods: new Map(),
+    /** @type {Map<string, AliasInfo>} */
     aliases: new Map(),
+    /** @type {Map<string, Map<string, MethodInfo>>} */
+    interfaces: new Map(),
+    /** @type {boolean} */
     initialized: false,
+    /** @type {string | null} */
     projectRoot: null
 };
 
@@ -52,16 +62,6 @@ const dtsCache = {
  * @type {DetectionResult}
  */
 const NULL_RESULT = { isAsync: null, source: null, returnType: null };
-
-/**
- * Pattern to detect Titan namespace declarations
- */
-const TITAN_NAMESPACE_PATTERN = /declare\s+namespace\s+(t|Titan)\s*\{/;
-
-/**
- * Pattern to detect TitanCore type references
- */
-const TITANCORE_TYPE_PATTERN = /TitanCore\.\w+/;
 
 /**
  * Directories to skip when scanning project
@@ -78,18 +78,24 @@ const SKIP_DIRECTORIES = new Set([
     '.output',
     'vendor',
     '__pycache__',
-    '.cache'
+    '.cache',
+    '.titan',
+    'target'
 ]);
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
 
 /**
  * Find project root by looking for package.json
- * @param {string} startPath - Starting path to search from
+ * @param {string} startPath
  * @returns {string | null}
  */
 function findProjectRoot(startPath) {
     let currentPath = startPath;
     const root = resolve('/');
-    
+
     while (currentPath !== root) {
         const packageJsonPath = join(currentPath, 'package.json');
         if (existsSync(packageJsonPath)) {
@@ -97,54 +103,41 @@ function findProjectRoot(startPath) {
         }
         currentPath = dirname(currentPath);
     }
-    
+
     return null;
 }
 
 /**
  * Get the .d.ts file path for a package
- * Checks: package.json "types" field, "typings" field, or index.d.ts
- * @param {string} packagePath - Path to the package in node_modules
+ * @param {string} packagePath
  * @returns {string | null}
  */
 function getPackageDtsPath(packagePath) {
     const packageJsonPath = join(packagePath, 'package.json');
-    
+
     if (!existsSync(packageJsonPath)) {
         return null;
     }
-    
+
     try {
         const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-        
-        // Check "types" field first (standard)
+
         if (packageJson.types) {
             const typesPath = resolve(packagePath, packageJson.types);
-            if (existsSync(typesPath)) {
-                return typesPath;
-            }
+            if (existsSync(typesPath)) return typesPath;
         }
-        
-        // Check "typings" field (legacy)
+
         if (packageJson.typings) {
             const typingsPath = resolve(packagePath, packageJson.typings);
-            if (existsSync(typingsPath)) {
-                return typingsPath;
-            }
+            if (existsSync(typingsPath)) return typingsPath;
         }
-        
-        // Fallback: check for index.d.ts
+
         const indexDtsPath = join(packagePath, 'index.d.ts');
-        if (existsSync(indexDtsPath)) {
-            return indexDtsPath;
-        }
-        
-        // Check dist/index.d.ts (common pattern)
+        if (existsSync(indexDtsPath)) return indexDtsPath;
+
         const distDtsPath = join(packagePath, 'dist', 'index.d.ts');
-        if (existsSync(distDtsPath)) {
-            return distDtsPath;
-        }
-        
+        if (existsSync(distDtsPath)) return distDtsPath;
+
         return null;
     } catch {
         return null;
@@ -152,35 +145,221 @@ function getPackageDtsPath(packagePath) {
 }
 
 /**
- * Parse a namespace block and extract async methods
- * @param {string} content - Namespace content
- * @param {string} prefix - Current namespace prefix (e.g., 't', 't.core')
+ * Check if a return type indicates an async method
+ * @param {string} returnType
+ * @returns {boolean}
+ */
+function isAsyncReturnType(returnType) {
+    if (!returnType) return false;
+    const trimmed = returnType.trim();
+    return trimmed.startsWith('Promise<') || trimmed.startsWith('Promise <');
+}
+
+/**
+ * Check if a path starts with t. or Titan.
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isTitanPath(path) {
+    if (!path || typeof path !== 'string') return false;
+    return path.startsWith('t.') || path.startsWith('Titan.');
+}
+
+// =============================================================================
+// DTS PARSING - INTERFACES
+// =============================================================================
+
+/**
+ * Parse interface methods and store them
+ * @param {string} interfaceName
+ * @param {string} content
+ */
+function parseInterfaceMethods(interfaceName, content) {
+    const methods = new Map();
+
+    // Match method signatures: methodName(params): ReturnType;
+    const methodRegex = /(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*:\s*([^;]+)/g;
+    let match;
+
+    while ((match = methodRegex.exec(content)) !== null) {
+        const methodName = match[1];
+        const returnType = match[3].trim();
+        const isAsync = isAsyncReturnType(returnType);
+
+        methods.set(methodName, {
+            isAsync,
+            returnType,
+            isMethod: true
+        });
+    }
+
+    // Match property references: propertyName: TypeName;
+    const propertyRegex = /^\s*(\w+)\s*:\s*([\w.]+)\s*;?\s*$/gm;
+
+    while ((match = propertyRegex.exec(content)) !== null) {
+        const propName = match[1];
+        const typeName = match[2].trim();
+
+        if (methods.has(propName)) continue;
+
+        methods.set(propName, {
+            isAsync: false,
+            returnType: typeName,
+            isReference: true,
+            referencedType: typeName
+        });
+    }
+
+    dtsCache.interfaces.set(interfaceName, methods);
+    return methods;
+}
+
+/**
+ * Parse namespace content for interfaces
+ * @param {string} content
+ * @param {string} namespaceName
+ */
+function parseNamespace(content, namespaceName) {
+    const interfaceRegex = /interface\s+(\w+)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g;
+    let match;
+
+    while ((match = interfaceRegex.exec(content)) !== null) {
+        const interfaceName = match[1];
+        const interfaceBody = match[2];
+        const fullName = `${namespaceName}.${interfaceName}`;
+        parseInterfaceMethods(fullName, interfaceBody);
+    }
+}
+
+/**
+ * Resolve Titan interface to method paths
+ * @param {string} prefix
+ * @param {Map<string, any>} methods
+ */
+function resolveTitanInterface(prefix, methods) {
+    for (const [methodName, info] of methods.entries()) {
+        const fullPath = `${prefix}.${methodName}`;
+
+        if (info.isReference && info.referencedType) {
+            resolveNestedInterface(fullPath, info.referencedType);
+        } else if (info.isMethod) {
+            dtsCache.methods.set(fullPath, {
+                isAsync: info.isAsync,
+                returnType: info.returnType
+            });
+        }
+    }
+}
+
+/**
+ * Resolve nested interface references
+ * @param {string} basePath
+ * @param {string} typeName
+ */
+function resolveNestedInterface(basePath, typeName) {
+    const interfaceMethods = dtsCache.interfaces.get(typeName);
+
+    if (interfaceMethods) {
+        for (const [methodName, info] of interfaceMethods.entries()) {
+            const fullPath = `${basePath}.${methodName}`;
+
+            if (info.isReference && info.referencedType) {
+                resolveNestedInterface(fullPath, info.referencedType);
+            } else if (info.isMethod) {
+                dtsCache.methods.set(fullPath, {
+                    isAsync: info.isAsync,
+                    returnType: info.returnType
+                });
+            }
+        }
+    }
+}
+
+// =============================================================================
+// DTS PARSING - DECLARE GLOBAL
+// =============================================================================
+
+/**
+ * Parse declare global block
+ * @param {string} content
+ */
+function parseDeclareGlobal(content) {
+    // Find const t: TypeName or const Titan: TypeName
+    const constRegex = /(?:const|var)\s+(t|Titan)\s*:\s*(\w+)/g;
+    let match;
+    const titanTypes = [];
+
+    while ((match = constRegex.exec(content)) !== null) {
+        const varName = match[1];
+        const typeName = match[2];
+        titanTypes.push({ varName, typeName });
+    }
+
+    // Parse all interfaces in the global block
+    const interfaceRegex = /interface\s+(\w+)\s*(?:extends\s+[\w,\s.]+)?\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}/g;
+
+    while ((match = interfaceRegex.exec(content)) !== null) {
+        const interfaceName = match[1];
+        const interfaceBody = match[2];
+        parseInterfaceMethods(interfaceName, interfaceBody);
+    }
+
+    // Parse typeof references: const myFetch: typeof t.fetch
+    const typeofRegex = /(?:const|var|let)\s+(\w+)\s*:\s*typeof\s+(t|Titan)\.(\w+(?:\.\w+)*)/g;
+
+    while ((match = typeofRegex.exec(content)) !== null) {
+        const aliasName = match[1];
+        const sourceVar = match[2];
+        const path = match[3];
+        const originalPath = `${sourceVar}.${path}`;
+
+        dtsCache.aliases.set(aliasName, {
+            originalPath,
+            source: 'declare-global',
+            isModule: false
+        });
+    }
+
+    // Resolve Titan types
+    for (const { varName, typeName } of titanTypes) {
+        const interfaceMethods = dtsCache.interfaces.get(typeName);
+        if (interfaceMethods) {
+            resolveTitanInterface(varName, interfaceMethods);
+        }
+    }
+}
+
+// =============================================================================
+// DTS PARSING - NAMESPACES
+// =============================================================================
+
+/**
+ * Parse traditional declare namespace t { ... }
+ * @param {string} content
+ * @param {string} prefix
  */
 function parseNamespaceContent(content, prefix) {
-    // Find async methods (return Promise<...>)
     const asyncMethodRegex = /(?:function\s+)?(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*(Promise\s*<[^;]+>)/g;
     let match;
-    
+
     while ((match = asyncMethodRegex.exec(content)) !== null) {
         const methodName = match[1];
         const returnType = match[2].trim();
         const fullPath = `${prefix}.${methodName}`;
-        
+
         dtsCache.methods.set(fullPath, {
             isAsync: true,
             returnType
         });
     }
-    
-    // Find sync methods (return type is NOT Promise)
+
     const syncMethodRegex = /(?:function\s+)?(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*(?!Promise\s*<)(\w+(?:<[^;]+>)?)/g;
-    
+
     while ((match = syncMethodRegex.exec(content)) !== null) {
         const methodName = match[1];
         const returnType = match[2].trim();
         const fullPath = `${prefix}.${methodName}`;
-        
-        // Don't overwrite if already detected as async
+
         if (!dtsCache.methods.has(fullPath)) {
             dtsCache.methods.set(fullPath, {
                 isAsync: false,
@@ -188,436 +367,289 @@ function parseNamespaceContent(content, prefix) {
             });
         }
     }
-    
-    // Recursively parse nested namespaces
+
     const nestedNamespaceRegex = /namespace\s+(\w+)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g;
-    
+
     while ((match = nestedNamespaceRegex.exec(content)) !== null) {
         const nestedName = match[1];
         const nestedContent = match[2];
         const nestedPrefix = `${prefix}.${nestedName}`;
-        
         parseNamespaceContent(nestedContent, nestedPrefix);
     }
 }
 
-/**
- * Parse destructuring patterns from source files
- * Detects: const { fetch, connect } = t
- *          const { fetch: myFetch } = t
- *          const { core: { fs } } = t
- * @param {string} content - File content
- * @param {string} filePath - Path to the file (for context)
- */
-function parseDestructuringPatterns(content) {
-    // Pattern: const { prop1, prop2 } = t or Titan
-    // Also handles: const { prop: alias } = t
-    const destructuringRegex = /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(t|Titan)\b/g;
-    let match;
-    
-    while ((match = destructuringRegex.exec(content)) !== null) {
-        const destructuredProps = match[1];
-        const sourceVar = match[2]; // 't' or 'Titan'
-        
-        // Parse individual properties
-        parseDestructuredProperties(destructuredProps, sourceVar);
-    }
-    
-    // Pattern: const { nested: { prop } } = t.something
-    const nestedDestructuringRegex = /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(t|Titan)\.(\w+(?:\.\w+)*)/g;
-    
-    while ((match = nestedDestructuringRegex.exec(content)) !== null) {
-        const destructuredProps = match[1];
-        const sourceVar = match[2];
-        const path = match[3];
-        const fullPrefix = `${sourceVar}.${path}`;
-        
-        parseDestructuredProperties(destructuredProps, fullPrefix);
-    }
-}
-
-/**
- * Parse destructured properties string
- * @param {string} propsString - The properties string inside { }
- * @param {string} sourcePrefix - The source prefix (e.g., 't', 't.core')
- */
-function parseDestructuredProperties(propsString, sourcePrefix) {
-    // Split by comma, handling nested objects
-    const props = splitDestructuredProps(propsString);
-    
-    for (const prop of props) {
-        const trimmed = prop.trim();
-        if (!trimmed) continue;
-        
-        // Check for rename: originalName: aliasName
-        const renameMatch = trimmed.match(/^(\w+)\s*:\s*(\w+)$/);
-        if (renameMatch) {
-            const originalName = renameMatch[1];
-            const aliasName = renameMatch[2];
-            const originalPath = `${sourcePrefix}.${originalName}`;
-            
-            dtsCache.aliases.set(aliasName, {
-                originalPath,
-                source: 'destructuring'
-            });
-            continue;
-        }
-        
-        // Check for nested destructuring: prop: { nested1, nested2 }
-        const nestedMatch = trimmed.match(/^(\w+)\s*:\s*\{([^}]+)\}$/);
-        if (nestedMatch) {
-            const propName = nestedMatch[1];
-            const nestedProps = nestedMatch[2];
-            const nestedPrefix = `${sourcePrefix}.${propName}`;
-            
-            parseDestructuredProperties(nestedProps, nestedPrefix);
-            continue;
-        }
-        
-        // Simple property name
-        const simpleMatch = trimmed.match(/^(\w+)$/);
-        if (simpleMatch) {
-            const propName = simpleMatch[1];
-            const originalPath = `${sourcePrefix}.${propName}`;
-            
-            dtsCache.aliases.set(propName, {
-                originalPath,
-                source: 'destructuring'
-            });
-        }
-    }
-}
-
-/**
- * Split destructured properties handling nested braces
- * @param {string} str - Properties string
- * @returns {string[]}
- */
-function splitDestructuredProps(str) {
-    const result = [];
-    let current = '';
-    let braceDepth = 0;
-    
-    for (const char of str) {
-        if (char === '{') {
-            braceDepth++;
-            current += char;
-        } else if (char === '}') {
-            braceDepth--;
-            current += char;
-        } else if (char === ',' && braceDepth === 0) {
-            result.push(current);
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-    
-    if (current.trim()) {
-        result.push(current);
-    }
-    
-    return result;
-}
-
-/**
- * Parse declare global blocks with Titan types
- * Detects: declare global { function fetch(): TitanCore.Response }
- *          declare global { const myFetch: typeof t.fetch }
- *          declare global { interface Window { fetch: TitanCore.Fetch } }
- * @param {string} content - File content
- */
-function parseDeclareGlobal(content) {
-    // Pattern: declare global { ... }
-    const declareGlobalRegex = /declare\s+global\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}/g;
-    let match;
-    
-    while ((match = declareGlobalRegex.exec(content)) !== null) {
-        const globalContent = match[1];
-        
-        // Parse function declarations with TitanCore types
-        parseDeclareGlobalFunctions(globalContent);
-        
-        // Parse const/var declarations with typeof t.xxx
-        parseDeclareGlobalConsts(globalContent);
-        
-        // Parse interface properties with TitanCore types
-        parseDeclareGlobalInterfaces(globalContent);
-    }
-}
-
-/**
- * Parse function declarations in declare global
- * @param {string} content - Global block content
- */
-function parseDeclareGlobalFunctions(content) {
-    // Pattern: function name(...): TitanCore.Type or Promise<TitanCore.Type>
-    const funcRegex = /function\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*((?:Promise\s*<)?TitanCore\.[^;]+>?)/g;
-    let match;
-    
-    while ((match = funcRegex.exec(content)) !== null) {
-        const funcName = match[1];
-        const returnType = match[2].trim();
-        const isAsync = returnType.startsWith('Promise');
-        
-        // Try to find the original Titan method by the function name
-        const possiblePaths = [`t.${funcName}`, `Titan.${funcName}`];
-        let originalPath = null;
-        
-        for (const path of possiblePaths) {
-            if (dtsCache.methods.has(path)) {
-                originalPath = path;
-                break;
-            }
-        }
-        
-        dtsCache.aliases.set(funcName, {
-            originalPath: originalPath || `t.${funcName}`,
-            source: 'declare-global'
-        });
-        
-        // Also register the method info if we don't have it
-        if (!dtsCache.methods.has(`global.${funcName}`)) {
-            dtsCache.methods.set(`global.${funcName}`, {
-                isAsync,
-                returnType,
-                aliasOf: originalPath
-            });
-        }
-    }
-}
-
-/**
- * Parse const declarations with typeof t.xxx in declare global
- * @param {string} content - Global block content
- */
-function parseDeclareGlobalConsts(content) {
-    // Pattern: const name: typeof t.something
-    const constRegex = /(?:const|var|let)\s+(\w+)\s*:\s*typeof\s+(t|Titan)\.(\w+(?:\.\w+)*)/g;
-    let match;
-    
-    while ((match = constRegex.exec(content)) !== null) {
-        const constName = match[1];
-        const sourceVar = match[2];
-        const path = match[3];
-        const originalPath = `${sourceVar}.${path}`;
-        
-        dtsCache.aliases.set(constName, {
-            originalPath,
-            source: 'declare-global'
-        });
-    }
-    
-    // Pattern: const name: TitanCore.Type
-    const titanCoreConstRegex = /(?:const|var|let)\s+(\w+)\s*:\s*(TitanCore\.\w+)/g;
-    
-    while ((match = titanCoreConstRegex.exec(content)) !== null) {
-        const constName = match[1];
-        const titanType = match[2];
-        
-        // Extract the type name from TitanCore.TypeName
-        const typeNameMatch = titanType.match(/TitanCore\.(\w+)/);
-        if (typeNameMatch) {
-            const typeName = typeNameMatch[1].toLowerCase();
-            // Try to find matching method
-            const possiblePaths = [`t.${typeName}`, `Titan.${typeName}`];
-            
-            for (const path of possiblePaths) {
-                if (dtsCache.methods.has(path)) {
-                    dtsCache.aliases.set(constName, {
-                        originalPath: path,
-                        source: 'declare-global'
-                    });
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/**
- * Parse interface properties in declare global
- * @param {string} content - Global block content
- */
-function parseDeclareGlobalInterfaces(content) {
-    // Pattern: interface Name { prop: TitanCore.Type }
-    const interfaceRegex = /interface\s+\w+\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g;
-    let match;
-    
-    while ((match = interfaceRegex.exec(content)) !== null) {
-        const interfaceContent = match[1];
-        
-        // Find properties with TitanCore types
-        const propRegex = /(\w+)\s*:\s*((?:Promise\s*<)?TitanCore\.[^;,}]+)/g;
-        let propMatch;
-        
-        while ((propMatch = propRegex.exec(interfaceContent)) !== null) {
-            const propName = propMatch[1];
-            const titanType = propMatch[2];
-            const isAsync = titanType.startsWith('Promise');
-            
-            // Register as potential global
-            if (!dtsCache.methods.has(`global.${propName}`)) {
-                dtsCache.methods.set(`global.${propName}`, {
-                    isAsync,
-                    returnType: titanType
-                });
-            }
-        }
-    }
-}
-
-/**
- * Parse export statements for Titan properties
- * Detects: export { fetch } from where fetch = t.fetch
- *          export const fetch = t.fetch
- *          export { fetch: t.fetch }
- * @param {string} content - File content
- */
-function parseExports(content) {
-    // Pattern: export const name = t.something
-    const exportConstRegex = /export\s+(?:const|let|var)\s+(\w+)\s*=\s*(t|Titan)\.(\w+(?:\.\w+)*)/g;
-    let match;
-    
-    while ((match = exportConstRegex.exec(content)) !== null) {
-        const exportName = match[1];
-        const sourceVar = match[2];
-        const path = match[3];
-        const originalPath = `${sourceVar}.${path}`;
-        
-        dtsCache.aliases.set(exportName, {
-            originalPath,
-            source: 'export'
-        });
-    }
-    
-    // Pattern in .d.ts: export { name: t.something } or similar type exports
-    // export type { Fetch as MyFetch } = typeof t.fetch
-    const exportTypeRegex = /export\s+(?:type\s+)?\{\s*(\w+)(?:\s+as\s+(\w+))?\s*\}\s*(?:=|:)\s*(?:typeof\s+)?(t|Titan)\.(\w+(?:\.\w+)*)/g;
-    
-    while ((match = exportTypeRegex.exec(content)) !== null) {
-        const originalName = match[1];
-        const aliasName = match[2] || originalName;
-        const sourceVar = match[3];
-        const path = match[4];
-        const originalPath = `${sourceVar}.${path}`;
-        
-        dtsCache.aliases.set(aliasName, {
-            originalPath,
-            source: 'export'
-        });
-    }
-    
-    // Pattern: export = t.something (module export)
-    const exportEqualsRegex = /export\s*=\s*(t|Titan)\.(\w+(?:\.\w+)*)/g;
-    
-    while ((match = exportEqualsRegex.exec(content)) !== null) {
-        const sourceVar = match[1];
-        const path = match[2];
-        const originalPath = `${sourceVar}.${path}`;
-        
-        // This exports the whole module as that Titan path
-        dtsCache.aliases.set('default', {
-            originalPath,
-            source: 'export'
-        });
-    }
-}
+// =============================================================================
+// DTS FILE PARSING
+// =============================================================================
 
 /**
  * Parse a .d.ts file and extract Titan async methods
- * @param {string} filePath - Path to .d.ts file
+ * @param {string} filePath
  */
 function parseDtsFile(filePath) {
     try {
         const content = readFileSync(filePath, 'utf-8');
-        
-        // Always parse declare global blocks (they may reference TitanCore)
-        if (content.includes('declare global')) {
-            parseDeclareGlobal(content);
-        }
-        
-        // Parse Titan namespace declarations
-        if (TITAN_NAMESPACE_PATTERN.test(content)) {
-            // Find all top-level Titan namespace declarations
-            const topLevelRegex = /declare\s+namespace\s+(t|Titan)\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}/g;
-            let match;
-            
-            while ((match = topLevelRegex.exec(content)) !== null) {
-                const namespaceName = match[1]; // 't' or 'Titan'
-                const namespaceContent = match[2];
-                
+
+        // 1. Parse namespaces first (like TitanCore)
+        const namespaceRegex = /namespace\s+(\w+)\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}/g;
+        let match;
+
+        while ((match = namespaceRegex.exec(content)) !== null) {
+            const namespaceName = match[1];
+            const namespaceContent = match[2];
+
+            if (namespaceName === 't' || namespaceName === 'Titan') {
                 parseNamespaceContent(namespaceContent, namespaceName);
+            } else {
+                parseNamespace(namespaceContent, namespaceName);
             }
         }
-        
-        // Parse export statements
-        if (content.includes('export')) {
-            parseExports(content);
+
+        // 2. Parse declare global
+        const declareGlobalRegex = /declare\s+global\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*\}[^{}]*)*)\}/g;
+
+        while ((match = declareGlobalRegex.exec(content)) !== null) {
+            const globalContent = match[1];
+            parseDeclareGlobal(globalContent);
         }
-        
+
+        // 3. Parse traditional declare namespace t/Titan
+        const titanNamespaceRegex = /declare\s+namespace\s+(t|Titan)\s*\{([^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*)\}/g;
+
+        while ((match = titanNamespaceRegex.exec(content)) !== null) {
+            const namespaceName = match[1];
+            const namespaceContent = match[2];
+            parseNamespaceContent(namespaceContent, namespaceName);
+        }
+
     } catch {
         // Ignore files that can't be read/parsed
     }
 }
 
+// =============================================================================
+// SOURCE FILE PARSING - ALL ALIAS PATTERNS
+// =============================================================================
+
 /**
- * Parse a source file (.js, .ts) for destructuring patterns
- * @param {string} filePath - Path to source file
+ * Parse ALL alias patterns from source files
+ * @param {string} content
+ */
+function parseSourceFileAliases(content) {
+    // Skip if no t or Titan reference
+    if (!content.includes('t.') && !content.includes('Titan.')) {
+        return;
+    }
+
+    let match;
+
+    // =========================================================================
+    // 1. DESTRUCTURING: const { fetch } = t
+    //                   const { fetch: myFetch } = t
+    //                   const { readFile } = t.core.fs
+    // =========================================================================
+
+    // Pattern: const { props } = t or Titan
+    const destructuringRegex = /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(t|Titan)(?:\.(\w+(?:\.\w+)*))?\s*[;\n]/g;
+
+    while ((match = destructuringRegex.exec(content)) !== null) {
+        const props = match[1];
+        const sourceVar = match[2]; // t or Titan
+        const path = match[3] || ''; // optional path like 'core.fs'
+        const prefix = path ? `${sourceVar}.${path}` : sourceVar;
+
+        // Parse each property
+        const propList = props.split(',');
+        for (const prop of propList) {
+            const trimmed = prop.trim();
+            if (!trimmed) continue;
+
+            // Check for rename: original: alias
+            const renameMatch = trimmed.match(/^(\w+)\s*:\s*(\w+)$/);
+            if (renameMatch) {
+                const originalName = renameMatch[1];
+                const aliasName = renameMatch[2];
+                const originalPath = `${prefix}.${originalName}`;
+
+                // Check if it's a module (has sub-methods) or a method
+                const isModule = hasSubMethods(originalPath);
+
+                dtsCache.aliases.set(aliasName, {
+                    originalPath,
+                    source: 'destructuring',
+                    isModule
+                });
+            } else {
+                // Simple property: const { fetch } = t
+                const simpleMatch = trimmed.match(/^(\w+)$/);
+                if (simpleMatch) {
+                    const propName = simpleMatch[1];
+                    const originalPath = `${prefix}.${propName}`;
+                    const isModule = hasSubMethods(originalPath);
+
+                    dtsCache.aliases.set(propName, {
+                        originalPath,
+                        source: 'destructuring',
+                        isModule
+                    });
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // 2. SIMPLE ASSIGNMENT: const myFetch = t.fetch
+    //                       const db = t.db
+    // =========================================================================
+
+    const simpleAssignmentRegex = /(?:const|let|var)\s+(\w+)\s*=\s*(t|Titan)\.(\w+(?:\.\w+)*)\s*[;\n]/g;
+
+    while ((match = simpleAssignmentRegex.exec(content)) !== null) {
+        const aliasName = match[1];
+        const sourceVar = match[2];
+        const path = match[3];
+        const originalPath = `${sourceVar}.${path}`;
+        const isModule = hasSubMethods(originalPath);
+
+        dtsCache.aliases.set(aliasName, {
+            originalPath,
+            source: 'assignment',
+            isModule
+        });
+    }
+
+    // =========================================================================
+    // 3. EXPORT ASSIGNMENT: export const myFetch = t.fetch
+    //                       export const db = t.db
+    // =========================================================================
+
+    const exportAssignmentRegex = /export\s+(?:const|let|var)\s+(\w+)\s*=\s*(t|Titan)\.(\w+(?:\.\w+)*)\s*[;\n]/g;
+
+    while ((match = exportAssignmentRegex.exec(content)) !== null) {
+        const aliasName = match[1];
+        const sourceVar = match[2];
+        const path = match[3];
+        const originalPath = `${sourceVar}.${path}`;
+        const isModule = hasSubMethods(originalPath);
+
+        dtsCache.aliases.set(aliasName, {
+            originalPath,
+            source: 'export',
+            isModule
+        });
+    }
+
+    // =========================================================================
+    // 4. EXPORT OBJECT: export const db = { query: t.db.query }
+    //    OBJECT INLINE: const utils = { fetch: t.fetch }
+    // =========================================================================
+
+    // This regex captures object literals assigned to variables
+    const objectAssignmentRegex = /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*\{([^{}]+)\}\s*[;\n]/g;
+
+    while ((match = objectAssignmentRegex.exec(content)) !== null) {
+        const objectName = match[1];
+        const objectContent = match[2];
+
+        // Find properties that reference t.* or Titan.*
+        const propRegex = /(\w+)\s*:\s*(t|Titan)\.(\w+(?:\.\w+)*)/g;
+        let propMatch;
+
+        while ((propMatch = propRegex.exec(objectContent)) !== null) {
+            const propName = propMatch[1];
+            const sourceVar = propMatch[2];
+            const path = propMatch[3];
+            const originalPath = `${sourceVar}.${path}`;
+
+            // Register as: objectName.propName -> originalPath
+            const aliasPath = `${objectName}.${propName}`;
+
+            dtsCache.aliases.set(aliasPath, {
+                originalPath,
+                source: 'object-property',
+                isModule: false
+            });
+        }
+    }
+
+    // =========================================================================
+    // 5. EXPORT DESTRUCTURING: export { fetch } where fetch was assigned earlier
+    //    This is handled by the above patterns since the variable needs to be
+    //    declared first
+    // =========================================================================
+}
+
+/**
+ * Check if a path has sub-methods (is a module, not a direct method)
+ * @param {string} path
+ * @returns {boolean}
+ */
+function hasSubMethods(path) {
+    // Check if any method starts with this path + '.'
+    for (const methodPath of dtsCache.methods.keys()) {
+        if (methodPath.startsWith(path + '.')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Parse a source file for aliases
+ * @param {string} filePath
  */
 function parseSourceFile(filePath) {
     try {
         const content = readFileSync(filePath, 'utf-8');
-        
-        // Only parse if file references t or Titan
-        if (!content.includes('= t') && !content.includes('= Titan') && 
-            !content.includes('=t') && !content.includes('=Titan')) {
-            return;
-        }
-        
-        parseDestructuringPatterns(content);
-        
+        parseSourceFileAliases(content);
     } catch {
-        // Ignore files that can't be read/parsed
+        // Ignore files that can't be read
     }
 }
 
-/**
- * Recursively scan a directory for .d.ts and source files
- * @param {string} dirPath - Directory to scan
- * @param {number} depth - Current depth (to limit recursion)
- * @param {number} maxDepth - Maximum recursion depth
- */
+// =============================================================================
+// DIRECTORY SCANNING
+// =============================================================================
+
 function scanDirectory(dirPath, depth = 0, maxDepth = 10) {
-    if (depth > maxDepth) {
-        return;
-    }
-    
+    // Two-pass scan: first .d.ts files (type definitions), then source files (aliases).
+    // This ensures that hasSubMethods() has all method definitions available
+    // when evaluating module alias isModule flags in source files.
+    scanDirectoryPass(dirPath, 'dts', depth, maxDepth);
+    scanDirectoryPass(dirPath, 'source', depth, maxDepth);
+}
+
+/**
+ * Single-pass directory scan for a specific file type
+ * @param {string} dirPath
+ * @param {'dts' | 'source'} pass - Which file types to process
+ * @param {number} depth
+ * @param {number} maxDepth
+ */
+function scanDirectoryPass(dirPath, pass, depth = 0, maxDepth = 10) {
+    if (depth > maxDepth) return;
+
     try {
         const entries = readdirSync(dirPath);
-        
+
         for (const entry of entries) {
-            // Skip hidden files and directories to skip
             if (entry.startsWith('.') || SKIP_DIRECTORIES.has(entry)) {
                 continue;
             }
-            
+
             const entryPath = join(dirPath, entry);
-            
+
             try {
                 const stat = statSync(entryPath);
-                
+
                 if (stat.isDirectory()) {
-                    // Recurse into subdirectory
-                    scanDirectory(entryPath, depth + 1, maxDepth);
+                    scanDirectoryPass(entryPath, pass, depth + 1, maxDepth);
                 } else if (stat.isFile()) {
                     const ext = extname(entry);
-                    
-                    if (ext === '.ts' && entry.endsWith('.d.ts')) {
-                        // Parse .d.ts files
+
+                    if (pass === 'dts' && ext === '.ts' && entry.endsWith('.d.ts')) {
                         parseDtsFile(entryPath);
-                    } else if (ext === '.js' || ext === '.ts' || ext === '.mjs') {
-                        // Parse source files for destructuring patterns
+                    } else if (pass === 'source' && (ext === '.js' || (ext === '.ts' && !entry.endsWith('.d.ts')) || ext === '.mjs')) {
                         parseSourceFile(entryPath);
                     }
                 }
@@ -631,45 +663,35 @@ function scanDirectory(dirPath, depth = 0, maxDepth = 10) {
 }
 
 /**
- * Process a single package to extract Titan type definitions
- * @param {string} packagePath - Path to package directory
+ * Process a single package
+ * @param {string} packagePath
  */
 function processPackage(packagePath) {
     const dtsPath = getPackageDtsPath(packagePath);
-    
     if (dtsPath) {
         parseDtsFile(dtsPath);
     }
 }
 
 /**
- * Scan node_modules for packages with Titan type definitions
- * @param {string} nodeModulesPath - Path to node_modules
+ * Scan node_modules
+ * @param {string} nodeModulesPath
  */
 function scanNodeModules(nodeModulesPath) {
-    if (!existsSync(nodeModulesPath)) {
-        return;
-    }
-    
+    if (!existsSync(nodeModulesPath)) return;
+
     try {
         const entries = readdirSync(nodeModulesPath);
-        
+
         for (const entry of entries) {
-            // Skip hidden files and common non-package directories
-            if (entry.startsWith('.') || entry === '.bin') {
-                continue;
-            }
-            
+            if (entry.startsWith('.') || entry === '.bin') continue;
+
             const entryPath = join(nodeModulesPath, entry);
-            
+
             try {
                 const stat = statSync(entryPath);
-                
-                if (!stat.isDirectory()) {
-                    continue;
-                }
-                
-                // Handle scoped packages (@scope/package)
+                if (!stat.isDirectory()) continue;
+
                 if (entry.startsWith('@')) {
                     const scopedEntries = readdirSync(entryPath);
                     for (const scopedEntry of scopedEntries) {
@@ -679,121 +701,145 @@ function scanNodeModules(nodeModulesPath) {
                             if (scopedStat.isDirectory()) {
                                 processPackage(scopedPackagePath);
                             }
-                        } catch {
-                            continue;
-                        }
+                        } catch { continue; }
                     }
                 } else {
                     processPackage(entryPath);
                 }
-            } catch {
-                continue;
-            }
+            } catch { continue; }
         }
     } catch {
         // Can't read node_modules
     }
 }
 
+// =============================================================================
+// CACHE INITIALIZATION
+// =============================================================================
+
 /**
- * Initialize the DTS cache by scanning node_modules and project
- * @param {string} projectRoot - Project root directory
+ * Initialize the cache
+ * @param {string} projectRoot
  */
 function initializeCache(projectRoot) {
     if (dtsCache.initialized && dtsCache.projectRoot === projectRoot) {
         return;
     }
-    
+
     dtsCache.methods.clear();
     dtsCache.aliases.clear();
+    dtsCache.interfaces.clear();
     dtsCache.projectRoot = projectRoot;
-    
-    // 1. Scan node_modules first (to get base Titan definitions)
+
+    // 1. Scan node_modules first (to get base definitions)
     const nodeModulesPath = join(projectRoot, 'node_modules');
     scanNodeModules(nodeModulesPath);
-    
-    // 2. Scan predefined local .d.ts paths (backwards compatible)
-    const localDtsPaths = [
-        join(projectRoot, 'types', 'titan.d.ts'),
-        join(projectRoot, 'src', 'types', 'titan.d.ts'),
-        join(projectRoot, 'typings', 'titan.d.ts'),
-        join(projectRoot, 'titan.d.ts')
-    ];
-    
-    for (const dtsPath of localDtsPaths) {
-        if (existsSync(dtsPath)) {
-            parseDtsFile(dtsPath);
-        }
-    }
-    
-    // 3. Recursively scan the entire project for .d.ts files and source files
+
+    // 2. Scan project for .d.ts files (to get local definitions)
     scanDirectory(projectRoot);
-    
+
+    // 3. Scan project again for source files (to get aliases)
+    // Note: This is done in the same scanDirectory call above
+
     dtsCache.initialized = true;
 }
 
+// =============================================================================
+// ALIAS RESOLUTION
+// =============================================================================
+
 /**
- * Resolve an alias to its original method info
- * @param {string} name - Alias name or method path
- * @returns {{ methodPath: string, methodInfo: MethodInfo | undefined }}
+ * Resolve a method path that might be an alias
+ * 
+ * Handles:
+ * - Direct paths: t.fetch -> t.fetch
+ * - Simple aliases: myFetch -> t.fetch
+ * - Module aliases: db.query -> t.db.query (where db = t.db)
+ * - Object property aliases: utils.fetch -> t.fetch
+ * 
+ * @param {string} path
+ * @returns {{ resolvedPath: string, methodInfo: MethodInfo | undefined }}
  */
-function resolveAlias(name) {
-    // Check if it's a direct method path
-    if (dtsCache.methods.has(name)) {
+function resolveMethodPath(path) {
+    // 1. Check if it's a direct method path
+    if (dtsCache.methods.has(path)) {
         return {
-            methodPath: name,
-            methodInfo: dtsCache.methods.get(name)
+            resolvedPath: path,
+            methodInfo: dtsCache.methods.get(path)
         };
     }
-    
-    // Check if it's an alias
-    const alias = dtsCache.aliases.get(name);
-    if (alias) {
-        const methodInfo = dtsCache.methods.get(alias.originalPath);
+
+    // 2. Check if it's a direct alias (myFetch -> t.fetch)
+    const directAlias = dtsCache.aliases.get(path);
+    if (directAlias) {
+        const methodInfo = dtsCache.methods.get(directAlias.originalPath);
         return {
-            methodPath: alias.originalPath,
+            resolvedPath: directAlias.originalPath,
             methodInfo
         };
     }
-    
-    // Check for global methods
-    const globalPath = `global.${name}`;
-    if (dtsCache.methods.has(globalPath)) {
-        return {
-            methodPath: globalPath,
-            methodInfo: dtsCache.methods.get(globalPath)
-        };
+
+    // 3. Check if it's a module alias path (db.query where db = t.db)
+    //    Split the path and check if the first part is a module alias
+    const parts = path.split('.');
+    if (parts.length >= 2) {
+        const firstPart = parts[0];
+        const alias = dtsCache.aliases.get(firstPart);
+
+        if (alias && alias.isModule) {
+            // Reconstruct the full path
+            const remainingPath = parts.slice(1).join('.');
+            const fullPath = `${alias.originalPath}.${remainingPath}`;
+            const methodInfo = dtsCache.methods.get(fullPath);
+
+            return {
+                resolvedPath: fullPath,
+                methodInfo
+            };
+        }
+
+        // 4. Check for object property aliases (utils.fetch -> t.fetch)
+        const objectPropAlias = dtsCache.aliases.get(path);
+        if (objectPropAlias) {
+            const methodInfo = dtsCache.methods.get(objectPropAlias.originalPath);
+            return {
+                resolvedPath: objectPropAlias.originalPath,
+                methodInfo
+            };
+        }
     }
-    
+
+    // 5. Not found
     return {
-        methodPath: name,
+        resolvedPath: path,
         methodInfo: undefined
     };
 }
 
+// =============================================================================
+// PUBLIC API
+// =============================================================================
+
 /**
  * Check if a method is async using .d.ts file definitions
  * 
- * @param {string} methodPath - Full method path (e.g., 't.ws.connect') or alias
+ * @param {string} methodPath - Full method path or alias
  * @param {Object} context - ESLint rule context
  * @returns {DetectionResult}
  */
 export function checkWithDtsFile(methodPath, context) {
     try {
-        // Get project root from context
         const filename = context.getFilename?.() || context.filename || '';
         const projectRoot = findProjectRoot(dirname(filename));
-        
+
         if (!projectRoot) {
             return NULL_RESULT;
         }
-        
-        // Initialize cache if needed
+
         initializeCache(projectRoot);
-        
-        // Try to resolve the method path (including aliases)
-        const { methodInfo } = resolveAlias(methodPath);
-        
+
+        const { methodInfo } = resolveMethodPath(methodPath);
+
         if (methodInfo !== undefined) {
             return {
                 isAsync: methodInfo.isAsync,
@@ -801,46 +847,109 @@ export function checkWithDtsFile(methodPath, context) {
                 returnType: methodInfo.returnType
             };
         }
-        
-        // Method not found in any .d.ts file
+
         return NULL_RESULT;
-        
+
     } catch {
         return NULL_RESULT;
     }
 }
 
 /**
- * Check if a name is a known Titan alias (from destructuring, declare global, or export)
+ * Check if a name is a known Titan alias
  * 
- * @param {string} name - Variable/function name to check
+ * @param {string} name - Variable name to check
  * @param {Object} context - ESLint rule context
- * @returns {{ isAlias: boolean, originalPath: string | null, source: string | null }}
+ * @returns {{ isAlias: boolean, originalPath: string | null, source: string | null, isModule: boolean }}
  */
 export function checkForAlias(name, context) {
     try {
         const filename = context.getFilename?.() || context.filename || '';
         const projectRoot = findProjectRoot(dirname(filename));
-        
+
         if (!projectRoot) {
-            return { isAlias: false, originalPath: null, source: null };
+            return { isAlias: false, originalPath: null, source: null, isModule: false };
         }
-        
+
         initializeCache(projectRoot);
-        
+
+        // 1. Direct alias lookup (myFetch -> t.fetch)
         const alias = dtsCache.aliases.get(name);
         if (alias) {
             return {
                 isAlias: true,
                 originalPath: alias.originalPath,
-                source: alias.source
+                source: alias.source,
+                isModule: alias.isModule || false
             };
         }
-        
-        return { isAlias: false, originalPath: null, source: null };
-        
+
+        // 2. Module alias path resolution (db.query where db = t.db)
+        const parts = name.split('.');
+        if (parts.length >= 2) {
+            const firstPart = parts[0];
+            const moduleAlias = dtsCache.aliases.get(firstPart);
+            if (moduleAlias && moduleAlias.isModule) {
+                const remainingPath = parts.slice(1).join('.');
+                const fullPath = `${moduleAlias.originalPath}.${remainingPath}`;
+                return {
+                    isAlias: true,
+                    originalPath: fullPath,
+                    source: moduleAlias.source,
+                    isModule: true
+                };
+            }
+        }
+
+        return { isAlias: false, originalPath: null, source: null, isModule: false };
+
     } catch {
-        return { isAlias: false, originalPath: null, source: null };
+        return { isAlias: false, originalPath: null, source: null, isModule: false };
+    }
+}
+
+/**
+ * Resolve a method path (including module aliases)
+ * 
+ * Examples:
+ * - t.fetch -> t.fetch
+ * - myFetch -> t.fetch (if const myFetch = t.fetch)
+ * - db.query -> t.db.query (if const db = t.db)
+ * 
+ * @param {string} methodPath
+ * @param {Object} context
+ * @returns {{ resolvedPath: string, wasAlias: boolean, isModule: boolean }}
+ */
+export function resolveAlias(methodPath, context) {
+    try {
+        const filename = context.getFilename?.() || context.filename || '';
+        const projectRoot = findProjectRoot(dirname(filename));
+
+        if (!projectRoot) {
+            return { resolvedPath: methodPath, wasAlias: false, isModule: false };
+        }
+
+        initializeCache(projectRoot);
+
+        // Direct Titan path
+        if (isTitanPath(methodPath)) {
+            return { resolvedPath: methodPath, wasAlias: false, isModule: false };
+        }
+
+        const { resolvedPath, methodInfo } = resolveMethodPath(methodPath);
+
+        if (resolvedPath !== methodPath && isTitanPath(resolvedPath)) {
+            return {
+                resolvedPath,
+                wasAlias: true,
+                isModule: methodInfo === undefined && hasSubMethods(resolvedPath)
+            };
+        }
+
+        return { resolvedPath: methodPath, wasAlias: false, isModule: false };
+
+    } catch {
+        return { resolvedPath: methodPath, wasAlias: false, isModule: false };
     }
 }
 
@@ -853,23 +962,25 @@ export function getAliases() {
 }
 
 /**
- * Clear the DTS cache (useful for testing or when files change)
+ * Clear the DTS cache
  */
 export function clearDtsCache() {
     dtsCache.methods.clear();
     dtsCache.aliases.clear();
+    dtsCache.interfaces.clear();
     dtsCache.initialized = false;
     dtsCache.projectRoot = null;
 }
 
 /**
  * Get cache statistics
- * @returns {{ methodsSize: number, aliasesSize: number, projectRoot: string | null }}
+ * @returns {{ methodsSize: number, aliasesSize: number, interfacesSize: number, projectRoot: string | null }}
  */
 export function getDtsCacheStats() {
     return {
         methodsSize: dtsCache.methods.size,
         aliasesSize: dtsCache.aliases.size,
+        interfacesSize: dtsCache.interfaces.size,
         projectRoot: dtsCache.projectRoot
     };
 }

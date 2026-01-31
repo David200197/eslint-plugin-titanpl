@@ -10,7 +10,7 @@ const plugin = {
         'no-async-await': noAsyncAwait,
         'drift-only-titan-async': driftOnlyTitanAsync,
         'require-drift': requireDrift
-    }
+    },
 };
 
 /**
@@ -18,6 +18,7 @@ const plugin = {
  */
 export const titanpl = {
     files: ['app/**/*.js'],
+    ignores: ['**/*.d.ts'],
     plugins: {
         titanpl: plugin
     },
@@ -39,7 +40,7 @@ export const titanpl = {
         'titanpl/no-async-await': 'error',
         'titanpl/drift-only-titan-async': 'error',
         'titanpl/require-drift': 'error'
-    }
+    },
 };
 
 export default plugin;
